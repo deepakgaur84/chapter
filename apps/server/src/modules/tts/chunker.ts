@@ -10,80 +10,108 @@ export interface TextChunk {
 }
 
 export interface ChunkOptions {
-  targetSize?: number; // Target characters per chunk (default: 3000)
-  maxSize?: number; // Maximum characters per chunk (default: 4000)
-  minSize?: number; // Minimum characters per chunk (default: 1000)
+  targetSize?: number; // Target characters per chunk (default: 800)
+  maxSize?: number; // Maximum characters per chunk (default: 1200)
+  minSize?: number; // Minimum characters per chunk (default: 400)
+  /**
+   * Target sizes (in characters) for the first chunks of a chapter, in order.
+   * Small early chunks let playback start quickly; later chunks grow to targetSize.
+   * Example: [250, 375, 560] makes chunk 0 about 250 characters, chunk 1 about 375,
+   * chunk 2 about 560, and every chunk after that targetSize.
+   */
+  rampUpSizes?: number[];
 }
 
 export class TextChunker {
   private targetSize: number;
   private maxSize: number;
   private minSize: number;
+  private rampUpSizes: number[];
 
   constructor(options: ChunkOptions = {}) {
     this.targetSize = options.targetSize || 800; // Smaller chunks for faster generation
     this.maxSize = options.maxSize || 1200;
     this.minSize = options.minSize || 400;
+    this.rampUpSizes = options.rampUpSizes ?? [];
+  }
+
+  /** Target size for the chunk at this index (ramp-up sizes first, then targetSize). */
+  private targetFor(index: number): number {
+    const ramp = this.rampUpSizes[index];
+    return ramp !== undefined ? Math.min(ramp, this.targetSize) : this.targetSize;
+  }
+
+  /** Hard size limit for the chunk at this index. Early ramp-up chunks get a tighter limit. */
+  private maxFor(index: number): number {
+    if (this.rampUpSizes[index] === undefined) {
+      return this.maxSize;
+    }
+    return Math.min(this.maxSize, Math.round(this.targetFor(index) * 1.5));
   }
 
   chunk(text: string, globalStartPosition: number = 0): TextChunk[] {
     const paragraphs = this.splitParagraphs(text);
 
     const chunks: TextChunk[] = [];
-    let currentChunk: string[] = [];
-    let currentLength = 0;
-    let chunkStartPosition = globalStartPosition;
+    let position = globalStartPosition;
 
-    for (let i = 0; i < paragraphs.length; i++) {
-      const paragraph = paragraphs[i];
-      const paragraphLength = paragraph.length;
+    const emit = (parts: string[]) => {
+      if (parts.length === 0) {
+        return;
+      }
+      chunks.push(this.createChunk(chunks.length, parts, position));
+      position += this.calculateLength(parts);
+    };
 
-      if (paragraphLength > this.maxSize) {
-        if (currentChunk.length > 0) {
-          chunks.push(this.createChunk(chunks.length, currentChunk, chunkStartPosition));
-          currentChunk = [];
-          currentLength = 0;
-          chunkStartPosition += this.calculateLength(currentChunk);
-        }
+    let current: string[] = [];
+    let currentLength = 0; // characters including the blank-line separators between paragraphs
 
-        const sentences = this.splitSentences(paragraph);
+    const flush = () => {
+      emit(current);
+      current = [];
+      currentLength = 0;
+    };
+
+    for (const paragraph of paragraphs) {
+      if (paragraph.length > this.maxFor(chunks.length)) {
+        // Paragraph is too long for the chunk being built: close it and split by sentences.
+        flush();
+
         let sentenceChunk: string[] = [];
         let sentenceLength = 0;
 
-        for (const sentence of sentences) {
-          if (sentenceLength + sentence.length > this.maxSize && sentenceChunk.length > 0) {
-            chunks.push(this.createChunk(chunks.length, sentenceChunk, chunkStartPosition));
-            chunkStartPosition += this.calculateLength(sentenceChunk);
+        for (const sentence of this.splitSentences(paragraph, this.maxFor(chunks.length))) {
+          const limit = this.maxFor(chunks.length);
+          const combined =
+            sentenceChunk.length > 0 ? sentenceLength + 2 + sentence.length : sentence.length;
+
+          if (combined > limit && sentenceChunk.length > 0) {
+            emit(sentenceChunk);
             sentenceChunk = [];
             sentenceLength = 0;
           }
 
+          sentenceLength =
+            sentenceChunk.length > 0 ? sentenceLength + 2 + sentence.length : sentence.length;
           sentenceChunk.push(sentence);
-          sentenceLength += sentence.length;
         }
 
-        if (sentenceChunk.length > 0) {
-          chunks.push(this.createChunk(chunks.length, sentenceChunk, chunkStartPosition));
-          chunkStartPosition += this.calculateLength(sentenceChunk);
-        }
-
+        emit(sentenceChunk);
         continue;
       }
 
-      if (currentLength + paragraphLength > this.targetSize && currentChunk.length > 0) {
-        chunks.push(this.createChunk(chunks.length, currentChunk, chunkStartPosition));
-        chunkStartPosition += this.calculateLength(currentChunk);
-        currentChunk = [];
-        currentLength = 0;
+      const combined = current.length > 0 ? currentLength + 2 + paragraph.length : paragraph.length;
+
+      if (current.length > 0 && combined > this.targetFor(chunks.length)) {
+        flush();
       }
 
-      currentChunk.push(paragraph);
-      currentLength += paragraphLength;
+      currentLength =
+        current.length > 0 ? currentLength + 2 + paragraph.length : paragraph.length;
+      current.push(paragraph);
     }
 
-    if (currentChunk.length > 0) {
-      chunks.push(this.createChunk(chunks.length, currentChunk, chunkStartPosition));
-    }
+    flush();
 
     return chunks;
   }
@@ -110,9 +138,38 @@ export class TextChunker {
       .filter((p) => p.length > 0);
   }
 
-  private splitSentences(text: string): string[] {
-    const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-    return sentences.map((s) => s.trim()).filter((s) => s.length > 0);
+  /**
+   * Split a paragraph into sentences. Text is never dropped: a sentence that is still longer
+   * than `limit` is broken on spaces so no single piece is oversized.
+   */
+  private splitSentences(text: string, limit: number): string[] {
+    const sentences = text
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+    const result: string[] = [];
+    for (const sentence of sentences) {
+      if (sentence.length <= limit) {
+        result.push(sentence);
+        continue;
+      }
+
+      let piece = '';
+      for (const word of sentence.split(/\s+/)) {
+        if (piece.length > 0 && piece.length + 1 + word.length > limit) {
+          result.push(piece);
+          piece = word;
+        } else {
+          piece = piece.length > 0 ? `${piece} ${word}` : word;
+        }
+      }
+      if (piece.length > 0) {
+        result.push(piece);
+      }
+    }
+
+    return result;
   }
 
   private calculateLength(paragraphs: string[]): number {
@@ -140,3 +197,11 @@ export function createCacheHash(text: string, voiceId: string, settings: any = {
 }
 
 export const chunker = new TextChunker();
+
+/**
+ * Chunker used for audio generation. The first three chunks of every chapter are small
+ * (250, 375, 560 characters) so playback can start within seconds on a slow CPU; each step is
+ * at most about 1.5x the previous one, so generation of the next chunk finishes before the
+ * current one has finished playing. Every chunk after that is the normal 800 characters.
+ */
+export const ttsChunker = new TextChunker({ rampUpSizes: [250, 375, 560] });
