@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
 Kokoro TTS HTTP Service
-Wraps the Kokoro TTS model in a simple HTTP API
+Wraps the Kokoro TTS model in a simple HTTP API.
+
+Long text is split into sentence-sized chunks before synthesis, and any
+chunk that still hits Kokoro's 510-phoneme limit is split in half and retried.
+Without this, a long paragraph is truncated or crashes with
+"IndexError: index 510 is out of bounds for axis 0 with size 510".
 """
 
 import io
 import os
 import wave
+import re
 import numpy as np
 from flask import Flask, request, jsonify, send_file
 from kokoro_onnx import Kokoro
@@ -14,16 +20,21 @@ from kokoro_onnx import Kokoro
 app = Flask(__name__)
 
 # Initialize Kokoro TTS (loaded once at startup)
-# Models will be downloaded automatically on first use
 print("Loading Kokoro TTS model...")
-model_path = os.path.expanduser("~/.cache/kokoro/kokoro-v1.0.onnx")
+# KOKORO_MODEL_PATH selects the model file (the Docker image sets it to the int8 quantized model).
+# If it is not set, the full-precision model in the cache folder is used.
+model_path = os.environ.get("KOKORO_MODEL_PATH") or os.path.expanduser("~/.cache/kokoro/kokoro-v1.0.onnx")
 voices_path = os.path.expanduser("~/.cache/kokoro/voices.bin")
+print(f"Using model file: {model_path}")
 kokoro = Kokoro(model_path, voices_path)
 print("Kokoro TTS model loaded successfully!")
 
 # Default settings
 DEFAULT_SPEED = 1.0
 DEFAULT_VOICE = 'af_bella'
+
+# Safe maximum characters per synthesis chunk (limit is 510 phonemes)
+MAX_CHARS = 300
 
 # Voice mapping (kokoro-onnx uses these voice codes)
 VOICE_MAP = {
@@ -38,10 +49,77 @@ VOICE_MAP = {
     'bm': 'bm',
 }
 
+
+def split_long_piece(piece, limit):
+    """Split one over-long sentence on spaces (hard cut if there are no spaces)."""
+    out = []
+    current = ''
+    for word in piece.split(' '):
+        if len(word) > limit:
+            if current:
+                out.append(current)
+                current = ''
+            out.extend(word[i:i + limit] for i in range(0, len(word), limit))
+        elif current and len(current) + 1 + len(word) > limit:
+            out.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        out.append(current)
+    return out
+
+
+def split_text(text, limit=MAX_CHARS):
+    """Split text into chunks of at most `limit` characters, preferring sentence ends."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+    pieces = re.split(r'(?<=[.!?;:])\s+', text)
+    chunks = []
+    current = ''
+    for piece in pieces:
+        if len(piece) > limit:
+            if current:
+                chunks.append(current)
+                current = ''
+            chunks.extend(split_long_piece(piece, limit))
+        elif current and len(current) + 1 + len(piece) > limit:
+            chunks.append(current)
+            current = piece
+        else:
+            current = f"{current} {piece}".strip()
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def synthesize_chunk(text, voice, speed):
+    """Synthesize one chunk. If it overflows the 510-entry limit, split it and retry."""
+    try:
+        return kokoro.create(text, voice=voice, speed=speed)
+    except IndexError as error:
+        if '510' not in str(error) or len(text) < 2:
+            raise
+        mid = len(text) // 2
+        candidates = [i for i in (text.rfind(' ', 0, mid), text.find(' ', mid)) if i > 0]
+        split_at = min(candidates, key=lambda i: abs(i - mid)) if candidates else mid
+        left = text[:split_at].strip()
+        right = text[split_at:].strip()
+        if not left or not right:
+            left, right = text[:mid], text[mid:]
+        left_audio, left_rate = synthesize_chunk(left, voice, speed)
+        right_audio, right_rate = synthesize_chunk(right, voice, speed)
+        if left_rate != right_rate:
+            raise RuntimeError("Kokoro returned inconsistent sample rates across text chunks")
+        return np.concatenate([left_audio, right_audio]), left_rate
+
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'service': 'kokoro-tts'})
+
 
 @app.route('/synthesize', methods=['POST'])
 def synthesize():
@@ -70,12 +148,21 @@ def synthesize():
         if voice not in VOICE_MAP:
             return jsonify({'error': f'Invalid voice: {voice}'}), 400
 
-        # Generate speech using Kokoro-ONNX
-        audio, sample_rate = kokoro.create(
-            text,
-            voice=VOICE_MAP[voice],
-            speed=speed,
-        )
+        chunks = [c for c in split_text(text) if c.strip()]
+        if not chunks:
+            return jsonify({'error': 'Text is empty'}), 400
+
+        # Generate speech chunk by chunk using Kokoro-ONNX
+        parts = []
+        sample_rate = None
+        for chunk in chunks:
+            audio_part, rate = synthesize_chunk(chunk, VOICE_MAP[voice], speed)
+            if sample_rate is None:
+                sample_rate = rate
+            elif rate != sample_rate:
+                raise RuntimeError("Kokoro returned inconsistent sample rates across text chunks")
+            parts.append(audio_part)
+        audio = np.concatenate(parts)
 
         # Convert float32 audio to int16
         audio_int16 = (audio * 32767).astype(np.int16)
@@ -111,6 +198,7 @@ def synthesize():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/voices', methods=['GET'])
 def voices():
     """List available voices"""
@@ -118,6 +206,7 @@ def voices():
         'voices': list(VOICE_MAP.keys()),
         'default': DEFAULT_VOICE
     })
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
