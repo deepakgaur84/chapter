@@ -2,7 +2,7 @@ import { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 import { kokoroService } from './kokoro.service';
 import { audioCacheService } from './audio-cache.service';
-import { chunker } from './chunker';
+import { ttsChunker, createCacheHash } from './chunker';
 import { prisma } from '../../core/database';
 
 const generateChapterSchema = z.object({
@@ -13,6 +13,12 @@ const generateChapterSchema = z.object({
       temperature: z.number().min(0).max(1).optional(),
     })
     .optional(),
+});
+
+const planQuerySchema = z.object({
+  voiceId: z.string(),
+  speed: z.coerce.number().min(0.5).max(2.0).optional(),
+  temperature: z.coerce.number().min(0).max(1).optional(),
 });
 
 export const ttsRoutes: FastifyPluginAsync = async (app) => {
@@ -131,7 +137,7 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Chapter not found' });
         }
 
-        const chunks = chunker.chunk(chapter.textContent, chapter.startPosition);
+        const chunks = ttsChunker.chunk(chapter.textContent, chapter.startPosition);
 
         const audioChunks = await audioCacheService.generateChapterAudio(
           bookId,
@@ -240,7 +246,7 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
           return reply.code(404).send({ error: 'Chapter not found' });
         }
 
-        const chunks = chunker.chunk(chapter.textContent, chapter.startPosition);
+        const chunks = ttsChunker.chunk(chapter.textContent, chapter.startPosition);
 
         if (index >= chunks.length) {
           return reply.code(404).send({ error: 'Chunk index out of range' });
@@ -271,6 +277,72 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
       }
     }
   );
+
+  // Playback plan for a chapter: how many chunks it has and which are already generated.
+  // The web player uses this to ask for one chunk at a time and to keep a few chunks ahead.
+  app.get<{
+    Params: { bookId: string; chapterId: string };
+    Querystring: { voiceId?: string; speed?: string; temperature?: string };
+  }>('/chapters/:bookId/:chapterId/plan', async (request, reply) => {
+    try {
+      const { bookId, chapterId } = request.params;
+      const userId = (request.user as any).userId;
+      const query = planQuerySchema.parse(request.query);
+
+      const userBook = await prisma.userBook.findUnique({
+        where: { userId_bookId: { userId, bookId } },
+      });
+
+      if (!userBook) {
+        return reply.code(403).send({ error: 'Access denied' });
+      }
+
+      const chapter = await prisma.chapter.findUnique({
+        where: { id: chapterId },
+      });
+
+      if (!chapter || chapter.bookId !== bookId) {
+        return reply.code(404).send({ error: 'Chapter not found' });
+      }
+
+      const chunks = ttsChunker.chunk(chapter.textContent, chapter.startPosition);
+      const settings = { speed: query.speed, temperature: query.temperature };
+      const hashes = chunks.map((chunk) => createCacheHash(chunk.text, query.voiceId, settings));
+
+      const rows =
+        hashes.length > 0
+          ? await prisma.tTSCache.findMany({
+              where: { contentHash: { in: hashes } },
+              select: { id: true, contentHash: true, audioDuration: true, audioSize: true },
+            })
+          : [];
+      const byHash = new Map(rows.map((row) => [row.contentHash, row]));
+
+      return reply.send({
+        chapterId,
+        total: chunks.length,
+        chunks: chunks.map((chunk, index) => {
+          const row = byHash.get(hashes[index]);
+          return {
+            index,
+            startPosition: chunk.startPosition,
+            endPosition: chunk.endPosition,
+            wordCount: chunk.wordCount,
+            cached: !!row,
+            id: row ? row.id : null,
+            duration: row ? row.audioDuration : null,
+            size: row ? row.audioSize : null,
+          };
+        }),
+      });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return reply.code(400).send({ error: 'Invalid input', details: error.errors });
+      }
+      const message = error instanceof Error ? error.message : 'Failed to build chapter plan';
+      return reply.code(500).send({ error: message });
+    }
+  });
 
   app.get<{ Params: { bookId: string; chapterId: string } }>(
     '/chapters/:bookId/:chapterId',
