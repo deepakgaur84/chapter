@@ -28,9 +28,22 @@ export class AudioCacheService {
   private cacheDir: string;
   private maxCacheSize: number;
 
+  // Requests for the same audio that arrive while it is being generated share one generation.
+  private inFlight = new Map<string, Promise<CachedAudio>>();
+
+  // Speech generation runs one job at a time. Two jobs at once on a CPU-only machine each take
+  // twice as long, so nothing finishes sooner and playback stalls longer.
+  private generationQueue: Promise<unknown> = Promise.resolve();
+
   constructor() {
     this.cacheDir = config.storage.audioPath;
     this.maxCacheSize = config.storage.audioCacheMaxSize;
+  }
+
+  private runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.generationQueue.then(task);
+    this.generationQueue = run.catch(() => undefined);
+    return run;
   }
 
   async getOrGenerateAudio(options: GenerateAudioOptions): Promise<CachedAudio> {
@@ -42,7 +55,17 @@ export class AudioCacheService {
       return cached;
     }
 
-    return await this.generateAndCache(options, contentHash);
+    const running = this.inFlight.get(contentHash);
+    if (running) {
+      return running;
+    }
+
+    const generation = this.generateAndCache(options, contentHash).finally(() => {
+      this.inFlight.delete(contentHash);
+    });
+    this.inFlight.set(contentHash, generation);
+
+    return generation;
   }
 
   private async getCachedAudio(contentHash: string): Promise<CachedAudio | null> {
@@ -67,11 +90,13 @@ export class AudioCacheService {
     options: GenerateAudioOptions,
     contentHash: string
   ): Promise<CachedAudio> {
-    const ttsResult = await kokoroService.generateSpeech({
-      text: options.text,
-      voiceId: options.voiceId,
-      settings: options.settings,
-    });
+    const ttsResult = await this.runExclusive(() =>
+      kokoroService.generateSpeech({
+        text: options.text,
+        voiceId: options.voiceId,
+        settings: options.settings,
+      })
+    );
 
     const audioFileName = `${contentHash}.${ttsResult.format}`;
     const audioPath = path.join(this.cacheDir, audioFileName);
@@ -79,25 +104,37 @@ export class AudioCacheService {
 
     const audioSize = ttsResult.audioData.length;
 
-    const cached = await prisma.tTSCache.create({
-      data: {
-        contentHash,
-        bookId: options.bookId,
-        chapterId: options.chapterId,
-        startPosition: options.startPosition,
-        endPosition: options.endPosition,
-        textContent: options.text,
-        voiceId: options.voiceId,
-        settings: options.settings as any,
-        audioPath,
-        audioFormat: ttsResult.format,
-        audioSize,
-        audioDuration: ttsResult.duration,
-        wordTimestamps: ttsResult.wordTimestamps as any,
-        accessCount: 1,
-        lastAccessed: new Date(),
-      },
-    });
+    let cached;
+    try {
+      cached = await prisma.tTSCache.create({
+        data: {
+          contentHash,
+          bookId: options.bookId,
+          chapterId: options.chapterId,
+          startPosition: options.startPosition,
+          endPosition: options.endPosition,
+          textContent: options.text,
+          voiceId: options.voiceId,
+          settings: options.settings as any,
+          audioPath,
+          audioFormat: ttsResult.format,
+          audioSize,
+          audioDuration: ttsResult.duration,
+          wordTimestamps: ttsResult.wordTimestamps as any,
+          accessCount: 1,
+          lastAccessed: new Date(),
+        },
+      });
+    } catch (error: any) {
+      // Another request stored the same audio first (unique contentHash). Use that row.
+      if (error?.code === 'P2002') {
+        const existing = await this.getCachedAudio(contentHash);
+        if (existing) {
+          return existing;
+        }
+      }
+      throw error;
+    }
 
     await this.evictIfNeeded();
 
