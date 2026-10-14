@@ -49,6 +49,23 @@ export class TextChunker {
     return Math.min(this.maxSize, Math.round(this.targetFor(index) * 1.5));
   }
 
+  /** Smallest size a chunk is allowed to stop at once it has passed its target. */
+  private minFor(index: number): number {
+    return Math.min(this.minSize, Math.round(this.targetFor(index) * 0.6));
+  }
+
+  /**
+   * Decide whether the chunk being built should be closed before adding more text.
+   * Close it when the combined size would pass the hard limit, or when it would pass the target
+   * and the chunk is already big enough to stand on its own.
+   */
+  private shouldClose(currentLength: number, combinedLength: number, index: number): boolean {
+    if (combinedLength > this.maxFor(index)) {
+      return true;
+    }
+    return combinedLength > this.targetFor(index) && currentLength >= this.minFor(index);
+  }
+
   chunk(text: string, globalStartPosition: number = 0): TextChunk[] {
     const paragraphs = this.splitParagraphs(text);
 
@@ -81,11 +98,13 @@ export class TextChunker {
         let sentenceLength = 0;
 
         for (const sentence of this.splitSentences(paragraph, this.maxFor(chunks.length))) {
-          const limit = this.maxFor(chunks.length);
           const combined =
             sentenceChunk.length > 0 ? sentenceLength + 2 + sentence.length : sentence.length;
 
-          if (combined > limit && sentenceChunk.length > 0) {
+          if (
+            sentenceChunk.length > 0 &&
+            this.shouldClose(sentenceLength, combined, chunks.length)
+          ) {
             emit(sentenceChunk);
             sentenceChunk = [];
             sentenceLength = 0;
@@ -102,7 +121,7 @@ export class TextChunker {
 
       const combined = current.length > 0 ? currentLength + 2 + paragraph.length : paragraph.length;
 
-      if (current.length > 0 && combined > this.targetFor(chunks.length)) {
+      if (current.length > 0 && this.shouldClose(currentLength, combined, chunks.length)) {
         flush();
       }
 
@@ -199,9 +218,15 @@ export function createCacheHash(text: string, voiceId: string, settings: any = {
 export const chunker = new TextChunker();
 
 /**
- * Chunker used for audio generation. The first three chunks of every chapter are small
- * (250, 375, 560 characters) so playback can start within seconds on a slow CPU; each step is
- * at most about 1.5x the previous one, so generation of the next chunk finishes before the
- * current one has finished playing. Every chunk after that is the normal 800 characters.
+ * Chunker used for audio generation. Chunks are about 50 words (300 characters) so each piece
+ * is quick to generate and little work is wasted when playback stops. The first two chunks of
+ * every chapter are smaller (150 and 225 characters) so playback can start within seconds on a
+ * slow CPU; each step is at most 1.5x the previous one, so generation of the next chunk
+ * finishes before the current one has finished playing.
  */
-export const ttsChunker = new TextChunker({ rampUpSizes: [250, 375, 560] });
+export const ttsChunker = new TextChunker({
+  targetSize: 300,
+  maxSize: 400,
+  minSize: 200,
+  rampUpSizes: [150, 225],
+});
