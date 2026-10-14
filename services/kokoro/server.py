@@ -26,7 +26,29 @@ print("Loading Kokoro TTS model...")
 model_path = os.environ.get("KOKORO_MODEL_PATH") or os.path.expanduser("~/.cache/kokoro/kokoro-v1.0.onnx")
 voices_path = os.path.expanduser("~/.cache/kokoro/voices.bin")
 print(f"Using model file: {model_path}")
-kokoro = Kokoro(model_path, voices_path)
+
+# KOKORO_THREADS limits how many CPU threads speech generation may use, which caps CPU load.
+# Docker's "cpus" limit does not work on every kernel (Synology DSM refuses it), so the limit is
+# applied here instead. If it is not set, ONNX Runtime uses every core (the default).
+try:
+    kokoro_threads = int(os.environ.get("KOKORO_THREADS", "0") or 0)
+except ValueError:
+    kokoro_threads = 0
+
+if kokoro_threads > 0:
+    import onnxruntime as ort
+
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = kokoro_threads
+    session_options.inter_op_num_threads = 1
+    print(f"Limiting speech generation to {kokoro_threads} CPU thread(s)")
+    session = ort.InferenceSession(
+        model_path, sess_options=session_options, providers=["CPUExecutionProvider"]
+    )
+    kokoro = Kokoro.from_session(session, voices_path)
+else:
+    kokoro = Kokoro(model_path, voices_path)
+
 print("Kokoro TTS model loaded successfully!")
 
 # Default settings
