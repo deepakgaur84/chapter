@@ -1,15 +1,22 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { resolveChunkIndex } from '../chunk-pipeline';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
 
 export interface AudioChunk {
-  id: string;
+  id: string; // empty until the audio for this chunk has been generated
   index: number;
   startPosition: number;
   endPosition: number;
-  audioDuration: number;
+  audioDuration: number; // an estimate until the chunk is ready
   audioSize: number;
   voiceId: string;
+  ready?: boolean;
+}
+
+// A chunk can be played once its audio exists. Chunks without audio yet are waited for.
+function isChunkReady(chunk?: AudioChunk): boolean {
+  return !!chunk && !!chunk.id && chunk.ready !== false;
 }
 
 export interface AudioPlayerState {
@@ -18,6 +25,7 @@ export interface AudioPlayerState {
   duration: number;
   buffered: number;
   isLoading: boolean;
+  isBuffering: boolean; // waiting for the next chunk to be generated
   speed: number;
   volume: number;
   currentChunkIndex: number;
@@ -72,6 +80,8 @@ export function useAudioPlayer({
   const animationFrameRef = useRef<number | null>(null);
   const hasInitializedRef = useRef<boolean>(false);
   const chunksRef = useRef<AudioChunk[]>(chunks);
+  const waitingRef = useRef<{ index: number; offset: number } | null>(null);
+  const speedRef = useRef<number>(1.0);
 
   const [state, setState] = useState<AudioPlayerState>({
     isPlaying: false,
@@ -79,6 +89,7 @@ export function useAudioPlayer({
     duration: 0,
     buffered: 0,
     isLoading: false,
+    isBuffering: false,
     speed: 1.0,
     volume: 1.0,
     currentChunkIndex: 0,
@@ -133,13 +144,18 @@ export function useAudioPlayer({
             if (decodedBuffersRef.current.has(chunkIndex)) {
               clearInterval(checkInterval);
               resolve(decodedBuffersRef.current.get(chunkIndex)!);
+            } else if (!pendingDecodes.current.has(chunkIndex)) {
+              // The decode finished without producing audio (it failed)
+              clearInterval(checkInterval);
+              resolve(null);
             }
           }, 50);
         });
       }
 
-      const chunk = chunks[chunkIndex];
-      if (!chunk) return null;
+      // Read from the ref so a callback created earlier still sees chunks that became ready since
+      const chunk = chunksRef.current[chunkIndex];
+      if (!isChunkReady(chunk)) return null;
 
       const ctx = ensureAudioContext();
       pendingDecodes.current.add(chunkIndex);
@@ -160,14 +176,18 @@ export function useAudioPlayer({
         return null;
       }
     },
-    [chunks, ensureAudioContext]
+    [ensureAudioContext]
   );
 
   // Preload upcoming chunks
   const preloadChunks = useCallback(
     (fromIndex: number, count: number = 2) => {
       for (let i = fromIndex; i < Math.min(fromIndex + count, chunks.length); i++) {
-        if (!decodedBuffersRef.current.has(i) && !pendingDecodes.current.has(i)) {
+        if (
+          !decodedBuffersRef.current.has(i) &&
+          !pendingDecodes.current.has(i) &&
+          isChunkReady(chunksRef.current[i])
+        ) {
           fetchAndDecodeChunk(i);
         }
       }
@@ -175,14 +195,12 @@ export function useAudioPlayer({
     [chunks.length, fetchAndDecodeChunk]
   );
 
-  // Preload new chunks when they arrive during playback
-  const prevChunkCountRef = useRef(chunks.length);
+  // When more chunks become ready during playback, start decoding the next ones
   useEffect(() => {
-    if (chunks.length > prevChunkCountRef.current && isPlayingRef.current) {
+    if (isPlayingRef.current || waitingRef.current) {
       preloadChunks(currentChunkIndexRef.current + 1, 3);
     }
-    prevChunkCountRef.current = chunks.length;
-  }, [chunks.length, preloadChunks]);
+  }, [chunks, preloadChunks]);
 
   // Schedule a chunk for playback
   const scheduleChunk = useCallback(
@@ -193,7 +211,7 @@ export function useAudioPlayer({
 
       const source = ctx.createBufferSource();
       source.buffer = buffer;
-      source.playbackRate.value = state.speed;
+      source.playbackRate.value = speedRef.current;
       source.connect(gainNode);
 
       // Calculate actual start time
@@ -203,7 +221,7 @@ export function useAudioPlayer({
 
       return { source, startTime, startOffset };
     },
-    [state.speed]
+    []
   );
 
   // Play from a specific chunk and offset
@@ -227,12 +245,37 @@ export function useAudioPlayer({
         nextSourceRef.current = null;
       }
 
+      waitingRef.current = null;
+
+      // The audio for this chunk is not generated yet: wait for it instead of stopping
+      if (!isChunkReady(chunksRef.current[chunkIndex])) {
+        waitingRef.current = { index: chunkIndex, offset: offsetWithinChunk };
+        currentChunkIndexRef.current = chunkIndex;
+        chunkStartOffsetRef.current = offsetWithinChunk;
+        isPlayingRef.current = false;
+        setState((prev) => ({
+          ...prev,
+          isPlaying: true,
+          isBuffering: true,
+          isLoading: false,
+          currentChunkIndex: chunkIndex,
+          currentTime: offsetWithinChunk,
+        }));
+        onChunkChange?.(chunkIndex);
+        return;
+      }
+
       setState((prev) => ({ ...prev, isLoading: true }));
 
       // Fetch and decode current chunk
       const buffer = await fetchAndDecodeChunk(chunkIndex);
       if (!buffer) {
-        setState((prev) => ({ ...prev, isLoading: false, error: 'Failed to load audio' }));
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          isBuffering: false,
+          error: 'Failed to load audio',
+        }));
         return;
       }
 
@@ -312,6 +355,8 @@ export function useAudioPlayer({
         ...prev,
         isPlaying: true,
         isLoading: false,
+        isBuffering: false,
+        error: null,
         currentChunkIndex: chunkIndex,
         currentTime: offsetWithinChunk,
         duration: buffer.duration,
@@ -321,7 +366,7 @@ export function useAudioPlayer({
       onChunkChange?.(chunkIndex);
 
       // Notify position change with chunk ID for word highlighting
-      const currentChunk = chunks[chunkIndex];
+      const currentChunk = chunksRef.current[chunkIndex];
       if (currentChunk && onPositionChange) {
         onPositionChange(offsetWithinChunk, currentChunk.id);
       }
@@ -404,13 +449,36 @@ export function useAudioPlayer({
         } catch (e) {}
         currentSourceRef.current = null;
       }
+      waitingRef.current = null;
       isPlayingRef.current = false;
-      setState((prev) => ({ ...prev, isPlaying: false }));
+      setState((prev) => ({ ...prev, isPlaying: false, isBuffering: false }));
     } else {
       // Resume from current position
       await playFromChunk(currentChunkIndexRef.current, state.currentTime);
     }
   }, [state.isPlaying, state.currentTime, playFromChunk]);
+
+  // Pause without toggling (used when audio could not be generated)
+  const pause = useCallback(() => {
+    waitingRef.current = null;
+    if (currentSourceRef.current) {
+      try {
+        currentSourceRef.current.stop();
+      } catch (e) {}
+      currentSourceRef.current = null;
+    }
+    isPlayingRef.current = false;
+    setState((prev) => ({ ...prev, isPlaying: false, isBuffering: false }));
+  }, []);
+
+  // Start playing as soon as a chunk we were waiting for has been generated
+  useEffect(() => {
+    const waiting = waitingRef.current;
+    if (waiting && isChunkReady(chunks[waiting.index])) {
+      waitingRef.current = null;
+      playFromChunk(waiting.index, waiting.offset);
+    }
+  }, [chunks, playFromChunk]);
 
   // Seek within current chunk
   const seek = useCallback(
@@ -454,6 +522,7 @@ export function useAudioPlayer({
 
   // Set playback speed
   const setSpeed = useCallback((speed: number) => {
+    speedRef.current = speed;
     setState((prev) => ({ ...prev, speed }));
     if (currentSourceRef.current) {
       currentSourceRef.current.playbackRate.value = speed;
@@ -562,6 +631,7 @@ export function useAudioPlayer({
         currentSourceRef.current = null;
       }
       isPlayingRef.current = false;
+      waitingRef.current = null;
       currentChunkIndexRef.current = 0;
       chunkStartOffsetRef.current = 0;
 
@@ -572,6 +642,7 @@ export function useAudioPlayer({
       setState((prev) => ({
         ...prev,
         isPlaying: false,
+        isBuffering: false,
         currentChunkIndex: 0,
         currentTime: 0,
         chapterCurrentTime: 0,
@@ -585,20 +656,24 @@ export function useAudioPlayer({
       hasInitializedRef.current = true;
 
       let chunkIndex = 0;
+      let startTime = initialTime || 0;
       if (initialChunkId) {
-        const foundIndex = chunks.findIndex((c) => c.id === initialChunkId);
+        const foundIndex = resolveChunkIndex(chunks, initialChunkId);
         if (foundIndex !== -1) {
           chunkIndex = foundIndex;
+        } else {
+          // The saved chunk no longer exists (for example the voice changed): start from the top
+          startTime = 0;
         }
       }
 
       currentChunkIndexRef.current = chunkIndex;
-      chunkStartOffsetRef.current = initialTime || 0;
+      chunkStartOffsetRef.current = startTime;
 
       setState((prev) => ({
         ...prev,
         currentChunkIndex: chunkIndex,
-        currentTime: initialTime || 0,
+        currentTime: startTime,
         chapterDuration,
       }));
 
@@ -652,6 +727,7 @@ export function useAudioPlayer({
       nextChunk,
       previousChunk,
       loadChunk,
+      pause,
     },
   };
 }
