@@ -12,16 +12,16 @@ import {
   ArrowLeft,
   Menu as MenuIcon,
 } from 'lucide-react';
-import { useAudioPlayer, type AudioChunk } from '@/lib/hooks/use-audio-player';
+import { useAudioPlayer } from '@/lib/hooks/use-audio-player';
+import type { UseChunkPipelineResult } from '@/lib/hooks/use-chunk-pipeline';
 import { ModeToggle, ReaderMode } from './ModeToggle';
 
 interface AudioPlayerProps {
   bookId: string;
   chapterId: string;
   chapterTitle: string;
-  chunks: AudioChunk[];
+  pipeline: UseChunkPipelineResult;
   onPositionChange?: (position: number, chunkId?: string) => void;
-  onChunkNeeded?: (chunkIndex: number) => Promise<void>;
   initialChunkId?: string;
   initialTime?: number;
   className?: string;
@@ -39,9 +39,8 @@ export function AudioPlayer({
   bookId,
   chapterId,
   chapterTitle,
-  chunks,
+  pipeline,
   onPositionChange,
-  onChunkNeeded,
   initialChunkId,
   initialTime,
   className = '',
@@ -56,12 +55,31 @@ export function AudioPlayer({
   const { state, controls } = useAudioPlayer({
     bookId,
     chapterId,
-    chunks,
+    chunks: pipeline.chunks,
     onPositionChange,
-    onChunkNeeded,
     initialChunkId,
     initialTime,
   });
+
+  // Tell the pipeline what the player is doing. It generates audio only while playing
+  // (plus the chunk the player is parked on), and stays a couple of chunks ahead.
+  const { setPlayback, stop: stopGenerating } = pipeline;
+  useEffect(() => {
+    setPlayback(state.isPlaying, state.currentChunkIndex);
+  }, [setPlayback, state.isPlaying, state.currentChunkIndex]);
+
+  // Stop generating when the player goes away (for example switching to reading mode)
+  useEffect(() => {
+    return () => stopGenerating();
+  }, [stopGenerating]);
+
+  // If audio cannot be generated, stop instead of waiting forever
+  const { pause } = controls;
+  useEffect(() => {
+    if (pipeline.error && state.isPlaying && state.isBuffering) {
+      pause();
+    }
+  }, [pipeline.error, state.isPlaying, state.isBuffering, pause]);
 
   const [isVisible, setIsVisible] = useState(true);
   const [lastScrollY, setLastScrollY] = useState(0);
@@ -223,10 +241,17 @@ export function AudioPlayer({
                 <SkipForward className="w-4 h-4 sm:w-5 sm:h-5 text-[hsl(var(--reader-text))]/60 group-hover:text-[hsl(var(--reader-text))] transition-colors duration-300" />
               </button>
 
-              {/* Time display - shows elapsed time only (total unknown during streaming) */}
-              <div className="flex items-center justify-center min-w-[60px] sm:min-w-[70px] h-9 sm:h-11 px-2.5 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8">
-                <span className="text-xs sm:text-sm font-semibold text-[hsl(var(--reader-text))]/70 tabular-nums">
-                  {formatTime(state.chapterCurrentTime)}
+              {/* Time display - elapsed time, or the status while audio is being prepared */}
+              <div
+                className="flex items-center justify-center min-w-[60px] sm:min-w-[70px] h-9 sm:h-11 px-2.5 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8"
+                title={pipeline.error || undefined}
+              >
+                <span className="text-xs sm:text-sm font-semibold text-[hsl(var(--reader-text))]/70 tabular-nums whitespace-nowrap">
+                  {pipeline.error
+                    ? 'Audio error'
+                    : state.isBuffering
+                      ? 'Buffering...'
+                      : formatTime(state.chapterCurrentTime)}
                 </span>
               </div>
             </div>
