@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/hooks/use-auth';
 import { useBook, useBookStructure, useChapter } from '@/lib/hooks/use-books';
-import { useGenerateAudio, useAudioChunks, useGenerateChunk } from '@/lib/hooks/use-tts';
+import { useChunkPipeline } from '@/lib/hooks/use-chunk-pipeline';
 import { useProgress } from '@/lib/hooks/use-progress';
 import { useSettingsStore } from '@/lib/stores/settings-store';
 import { useOnlineStatus } from '@/lib/hooks/use-online-status';
@@ -14,6 +14,7 @@ import { ReaderMode } from '@/components/reader/ModeToggle';
 import { ReadAlongView } from '@/components/reader/ReadAlongView';
 import { UnifiedControls } from '@/components/reader/unified-controls';
 import { readingToAudioPosition, audioToReadingPosition } from '@/lib/position-sync';
+import { chunkKey, resolveChunkIndex } from '@/lib/chunk-pipeline';
 
 export default function ReaderPage() {
   const params = useParams();
@@ -34,13 +35,22 @@ export default function ReaderPage() {
   const { progress, updateProgress, saveNow } = useProgress(bookId);
   const { data: chapter, isLoading: chapterLoading } = useChapter(bookId, currentChapter);
   const { isOnline } = useOnlineStatus();
-  const { generate, isGenerating } = useGenerateAudio();
-  const { generateChunk } = useGenerateChunk();
   const { tts } = useSettingsStore();
 
   // Get chapter ID from structure
   const chapterId = structure?.chapters[currentChapter]?.id;
-  const { data: audioChunks, refetch: refetchChunks } = useAudioChunks(bookId, chapterId || '');
+
+  // Plan of the chapter's audio chunks. Audio is generated a few chunks at a time, only while
+  // the player is playing (see AudioPlayer), instead of all at once.
+  const pipeline = useChunkPipeline({
+    bookId,
+    chapterId,
+    voiceId: tts.voiceId,
+    speed: tts.speed,
+    temperature: tts.temperature,
+    enabled: !!chapterId && isOnline,
+  });
+  const audioChunks = pipeline.chunks;
 
   // Handle scroll progress updates (only in reading mode)
   const handleScrollProgress = useCallback(
@@ -73,22 +83,6 @@ export default function ReaderPage() {
       });
     },
     [currentChapter, chapterId, updateProgress]
-  );
-
-  // On-demand chunk generation when a chunk is needed but not yet generated
-  const handleChunkNeeded = useCallback(
-    async (chunkIndex: number) => {
-      if (!chapterId) return;
-      await generateChunk({
-        bookId,
-        chapterId,
-        chunkIndex,
-        voiceId: tts.voiceId,
-        settings: { speed: tts.speed, temperature: tts.temperature },
-      });
-      await refetchChunks();
-    },
-    [bookId, chapterId, generateChunk, refetchChunks, tts.voiceId, tts.speed, tts.temperature]
   );
 
   useEffect(() => {
@@ -134,13 +128,6 @@ export default function ReaderPage() {
     };
   }, [book?.title]);
 
-  // Initialize currentAudioChunk when chunks become available
-  useEffect(() => {
-    if (mode === 'listening' && audioChunks && audioChunks.length > 0 && !currentAudioChunk) {
-      setCurrentAudioChunk(audioChunks[0].id);
-    }
-  }, [mode, audioChunks, currentAudioChunk]);
-
   // Switch to reading mode if we go offline while listening
   useEffect(() => {
     if (!isOnline && mode === 'listening') {
@@ -148,72 +135,16 @@ export default function ReaderPage() {
     }
   }, [isOnline, mode]);
 
-  // Generate audio when switching to listening mode
+  // Go back to reading mode if the audio plan cannot be loaded, or the chapter has no text
   useEffect(() => {
-    const generateAudioIfNeeded = async () => {
-      // Check if we need to generate: no chunks, or chunks use different voice
-      const needsGeneration =
-        !audioChunks ||
-        audioChunks.length === 0 ||
-        (audioChunks[0]?.voiceId && audioChunks[0].voiceId !== tts.voiceId);
-
-      if (mode === 'listening' && chapterId && needsGeneration) {
-        try {
-          await generate({
-            bookId,
-            chapterId,
-            voiceId: tts.voiceId,
-            settings: {
-              speed: tts.speed,
-              temperature: tts.temperature,
-            },
-          });
-          refetchChunks();
-        } catch (error) {
-          console.error('Failed to generate audio:', error);
-          setMode('reading');
-        }
-      }
-    };
-
-    generateAudioIfNeeded();
-  }, [
-    mode,
-    chapterId,
-    audioChunks,
-    generate,
-    bookId,
-    refetchChunks,
-    tts.voiceId,
-    tts.speed,
-    tts.temperature,
-  ]);
-
-  // Poll for new chunks while in listening mode (background generation)
-  useEffect(() => {
-    if (mode !== 'listening' || !chapterId) return;
-
-    let stableCount = 0;
-    let lastChunkCount = audioChunks?.length || 0;
-
-    const pollInterval = setInterval(() => {
-      refetchChunks().then(() => {
-        const currentCount = audioChunks?.length || 0;
-        if (currentCount === lastChunkCount) {
-          stableCount++;
-          // Stop polling after chunk count is stable for 3 cycles (9 seconds)
-          if (stableCount >= 3) {
-            clearInterval(pollInterval);
-          }
-        } else {
-          stableCount = 0;
-          lastChunkCount = currentCount;
-        }
-      });
-    }, 3000);
-
-    return () => clearInterval(pollInterval);
-  }, [mode, chapterId, refetchChunks, audioChunks?.length]);
+    if (mode !== 'listening') return;
+    if (pipeline.planError) {
+      console.error('Audio is not available:', pipeline.planError);
+      setMode('reading');
+    } else if (pipeline.isPlanReady && pipeline.chunks.length === 0) {
+      setMode('reading');
+    }
+  }, [mode, pipeline.planError, pipeline.isPlanReady, pipeline.chunks.length]);
 
   if (authLoading || bookLoading) {
     return (
@@ -262,12 +193,13 @@ export default function ReaderPage() {
     const chapterText = chapter?.paragraphs?.map((p: any) => p.text).join('\n\n') || '';
 
     if (newMode === 'listening' && oldMode === 'reading') {
-      if (audioChunks && audioChunks.length > 0 && chapterText) {
+      if (audioChunks.length > 0 && chapterText) {
+        // Chunks are identified by position (idx:N) so this works before their audio exists
         const audioPos = readingToAudioPosition(
           currentScrollProgress,
           chapterText,
-          audioChunks.map((chunk: any) => ({
-            id: chunk.id,
+          audioChunks.map((chunk) => ({
+            id: chunkKey(chunk.index),
             startPosition: chunk.startPosition,
             endPosition: chunk.endPosition,
             audioDuration: chunk.audioDuration,
@@ -286,13 +218,14 @@ export default function ReaderPage() {
         }
       }
     } else if (newMode === 'reading' && oldMode === 'listening') {
-      if (audioChunks && audioChunks.length > 0 && progress?.audioChunkId) {
+      if (audioChunks.length > 0 && progress?.audioChunkId) {
+        const savedIndex = resolveChunkIndex(audioChunks, progress.audioChunkId);
         const scrollPos = audioToReadingPosition(
-          progress.audioChunkId,
+          chunkKey(savedIndex),
           progress.audioTimestamp || 0,
           chapterText,
-          audioChunks.map((chunk: any) => ({
-            id: chunk.id,
+          audioChunks.map((chunk) => ({
+            id: chunkKey(chunk.index),
             startPosition: chunk.startPosition,
             endPosition: chunk.endPosition,
             audioDuration: chunk.audioDuration,
@@ -347,8 +280,8 @@ export default function ReaderPage() {
         />
       </div>
 
-      {/* In-place loading overlay for audio generation */}
-      {isGenerating && (
+      {/* Short loading overlay while the audio plan for this chapter loads */}
+      {mode === 'listening' && pipeline.isPlanLoading && (
         <div className="fixed inset-0 z-40 pointer-events-none">
           {/* Dim backdrop */}
           <div className="absolute inset-0 bg-[hsl(var(--reader-bg))]/60 backdrop-blur-[2px] transition-opacity duration-300" />
@@ -387,14 +320,13 @@ export default function ReaderPage() {
           disableListening={!isOnline}
           disableListeningReason="Listen mode requires an internet connection"
         />
-      ) : audioChunks && audioChunks.length > 0 && !isGenerating ? (
+      ) : audioChunks.length > 0 ? (
         <AudioPlayer
           bookId={bookId}
           chapterId={chapterId || ''}
           chapterTitle={currentChapterData?.title || `Chapter ${currentChapter + 1}`}
-          chunks={audioChunks}
+          pipeline={pipeline}
           onPositionChange={handlePositionChange}
-          onChunkNeeded={handleChunkNeeded}
           initialChunkId={currentAudioChunk || undefined}
           initialTime={currentAudioTime || undefined}
           book={book}
