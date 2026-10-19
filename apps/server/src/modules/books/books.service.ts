@@ -154,6 +154,22 @@ export class BooksService {
       });
 
       if (book) {
+        // Remove the generated audio files too. Deleting the book removes their database rows,
+        // but not the files, which would otherwise stay on disk forever.
+        const audioEntries = await prisma.tTSCache.findMany({
+          where: { bookId },
+          select: { audioPath: true },
+        });
+        for (const entry of audioEntries) {
+          try {
+            await deleteFile(entry.audioPath);
+          } catch (error) {
+            console.error(`Failed to delete audio file ${entry.audioPath}:`, error);
+          }
+        }
+
+        // This is Chapter's own stored copy of the book (data/books/<hash>.epub).
+        // The original file in a watched folder is never touched.
         await deleteFile(book.filePath);
         if (book.coverPath) {
           await deleteFile(book.coverPath);
