@@ -3,6 +3,12 @@ import { folderScannerService } from './folder-scanner.service';
 import { epubProcessor } from '../books/epub.processor';
 import { readFile } from '../../core/storage';
 import { config } from '../../core/config';
+import {
+  findFilesMatchingBook,
+  assertFilesDeletable,
+  removeFiles,
+  type RemoveFilesResult,
+} from './source-files';
 import type { WatchedFolder, ScanResult } from '@chapter/types';
 
 export class LibraryService {
@@ -270,6 +276,45 @@ export class LibraryService {
     const filename = filePath.split('/').pop() || 'unknown.epub';
     await epubProcessor.processEPUB(userId, epubBuffer, filename);
     return true;
+  }
+
+  /**
+   * Find the original .epub file(s) of a book inside this user's watched folders.
+   * Nothing is deleted here. Throws if Chapter would not be allowed to delete a match, so the
+   * caller can stop before removing anything.
+   */
+  async findSourceFilesForBook(userId: string, bookId: string): Promise<string[]> {
+    const userBook = await prisma.userBook.findUnique({
+      where: { userId_bookId: { userId, bookId } },
+      include: { book: { select: { fileHash: true, fileSize: true } } },
+    });
+
+    if (!userBook) {
+      throw new Error('Book not found');
+    }
+
+    const folders = await prisma.watchedFolder.findMany({ where: { userId } });
+    const epubPaths: string[] = [];
+
+    for (const folder of folders) {
+      const scan = await folderScannerService.scanFolder(folder.path);
+      epubPaths.push(...scan.epubFiles);
+    }
+
+    const matches = await findFilesMatchingBook(
+      epubPaths,
+      userBook.book.fileHash,
+      userBook.book.fileSize
+    );
+    await assertFilesDeletable(matches);
+    return matches;
+  }
+
+  /**
+   * Delete files found by findSourceFilesForBook
+   */
+  async removeSourceFiles(filePaths: string[]): Promise<RemoveFilesResult> {
+    return removeFiles(filePaths);
   }
 
   /**
