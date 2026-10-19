@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { booksService } from './books.service';
+import { libraryService } from '../library/library.service';
 
 export const booksRoutes: FastifyPluginAsync = async (app) => {
   app.get('/cover-proxy', async (request, reply) => {
@@ -202,9 +203,24 @@ export const booksRoutes: FastifyPluginAsync = async (app) => {
     try {
       const userId = (request.user as any).userId;
       const { bookId } = request.params as any;
+      const { deleteSourceFiles } = request.query as { deleteSourceFiles?: string };
+
+      // Optional: also delete the original .epub from the user's watched folders, so a rescan
+      // cannot add the book again. The files are located (and checked to be deletable) before
+      // anything is removed, and deleted only after the book itself is gone.
+      const sourceFiles =
+        deleteSourceFiles === 'true'
+          ? await libraryService.findSourceFilesForBook(userId, bookId)
+          : [];
 
       await booksService.deleteBook(userId, bookId);
-      return reply.code(204).send();
+
+      if (sourceFiles.length === 0) {
+        return reply.code(204).send();
+      }
+
+      const result = await libraryService.removeSourceFiles(sourceFiles);
+      return reply.send(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to delete book';
       return reply.code(500).send({ error: message });
