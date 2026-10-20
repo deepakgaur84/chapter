@@ -75,7 +75,8 @@ export function useBooks() {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (bookId: string) => apiClient.deleteBook(bookId),
+    mutationFn: ({ bookId, deleteSourceFiles }: { bookId: string; deleteSourceFiles: boolean }) =>
+      apiClient.deleteBook(bookId, deleteSourceFiles),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['books'] });
     },
@@ -192,7 +193,8 @@ export function useBooks() {
     uploadBooks,
     uploadingBooks,
     dismissUploadError,
-    deleteBook: deleteMutation.mutateAsync,
+    deleteBook: (bookId: string, deleteSourceFiles = false) =>
+      deleteMutation.mutateAsync({ bookId, deleteSourceFiles }),
     toggleFavorite,
     isUploading:
       uploadMutation.isPending ||
