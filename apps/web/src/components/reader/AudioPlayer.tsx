@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Menu } from '@base-ui/react/menu';
 import {
   Play,
@@ -15,6 +16,67 @@ import {
 import { useAudioPlayer } from '@/lib/hooks/use-audio-player';
 import type { UseChunkPipelineResult } from '@/lib/hooks/use-chunk-pipeline';
 import { ModeToggle, ReaderMode } from './ModeToggle';
+import {
+  audioLog,
+  clearAudioLog,
+  formatLogTime,
+  getAudioLog,
+  subscribeAudioLog,
+  type AudioLogEntry,
+} from '@/lib/audio-debug';
+
+// Tap the time display this many times (within a few seconds) to show or hide the audio log
+const DEBUG_TAPS = 5;
+const DEBUG_TAP_WINDOW_MS = 3000;
+
+// On-screen audio log, for diagnosing problems on a phone where there is no developer console
+function AudioDebugPanel({ onClose }: { onClose: () => void }) {
+  const [entries, setEntries] = useState<AudioLogEntry[]>(() => getAudioLog());
+
+  useEffect(() => {
+    setEntries(getAudioLog());
+    return subscribeAudioLog(() => setEntries(getAudioLog()));
+  }, []);
+
+  if (typeof document === 'undefined') return null;
+
+  // Newest first, so the latest events are visible without scrolling
+  const shown = entries.slice(-60).reverse();
+
+  return createPortal(
+    <div
+      className="fixed left-2 right-2 top-2 z-[200] max-h-[55vh] overflow-y-auto rounded-lg bg-black/90 p-2 text-[10px] leading-snug text-green-300 font-mono shadow-2xl"
+      role="log"
+      aria-label="Audio log"
+    >
+      <div className="mb-1 flex items-center justify-between gap-2 text-white/80">
+        <span className="font-semibold">Audio log (newest first)</span>
+        <span className="flex gap-2">
+          <button
+            type="button"
+            className="rounded bg-white/15 px-2 py-0.5"
+            onClick={() => clearAudioLog()}
+          >
+            Clear
+          </button>
+          <button type="button" className="rounded bg-white/15 px-2 py-0.5" onClick={onClose}>
+            Close
+          </button>
+        </span>
+      </div>
+      {shown.length === 0 ? (
+        <div className="text-white/50">Nothing logged yet.</div>
+      ) : (
+        shown.map((entry, i) => (
+          <div key={`${entry.at}-${i}`} className="break-words">
+            <span className="text-white/50">{formatLogTime(entry.at)}</span> {entry.message}
+          </div>
+        ))
+      )}
+    </div>,
+    document.body
+  );
+}
 
 interface AudioPlayerProps {
   bookId: string;
@@ -83,6 +145,25 @@ export function AudioPlayer({
 
   const [isVisible, setIsVisible] = useState(true);
   const [lastScrollY, setLastScrollY] = useState(0);
+
+  // Five quick taps on the time display toggle the on-screen audio log
+  const [showDebug, setShowDebug] = useState(false);
+  const tapTimesRef = useRef<number[]>([]);
+  const handleTimeDisplayTap = () => {
+    const now = Date.now();
+    tapTimesRef.current = [...tapTimesRef.current.filter((t) => now - t < DEBUG_TAP_WINDOW_MS), now];
+    if (tapTimesRef.current.length >= DEBUG_TAPS) {
+      tapTimesRef.current = [];
+      setShowDebug((shown) => !shown);
+    }
+  };
+
+  // Record what the player is doing, so a stall can be explained afterwards
+  useEffect(() => {
+    audioLog(
+      `player: ${state.isPlaying ? 'playing' : 'paused'}${state.isBuffering ? ' (buffering)' : ''}, chunk ${state.currentChunkIndex}`
+    );
+  }, [state.isPlaying, state.isBuffering, state.currentChunkIndex]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -179,6 +260,8 @@ export function AudioPlayer({
         isVisible ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0'
       } ${className}`}
     >
+      {showDebug && <AudioDebugPanel onClose={() => setShowDebug(false)} />}
+
       {/* Refined gradient backdrop */}
       <div className="relative bg-gradient-to-b from-[hsl(var(--reader-bg))]/95 via-[hsl(var(--reader-bg))]/98 to-[hsl(var(--reader-bg))] backdrop-blur-2xl border-t border-[hsl(var(--reader-text))]/8">
         {/* Elegant top accent line */}
@@ -243,15 +326,18 @@ export function AudioPlayer({
 
               {/* Time display - elapsed time, or the status while audio is being prepared */}
               <div
-                className="flex items-center justify-center min-w-[60px] sm:min-w-[70px] h-9 sm:h-11 px-2.5 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8"
+                className="flex items-center justify-center min-w-[60px] sm:min-w-[70px] h-9 sm:h-11 px-2.5 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8 select-none"
                 title={pipeline.error || undefined}
+                onClick={handleTimeDisplayTap}
               >
                 <span className="text-xs sm:text-sm font-semibold text-[hsl(var(--reader-text))]/70 tabular-nums whitespace-nowrap">
                   {pipeline.error
                     ? 'Audio error'
-                    : state.isBuffering
-                      ? 'Buffering...'
-                      : formatTime(state.chapterCurrentTime)}
+                    : state.error === 'interrupted'
+                      ? 'Tap play'
+                      : state.isBuffering
+                        ? 'Buffering...'
+                        : formatTime(state.chapterCurrentTime)}
                 </span>
               </div>
             </div>
