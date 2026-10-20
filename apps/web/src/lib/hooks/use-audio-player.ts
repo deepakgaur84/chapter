@@ -1,7 +1,20 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { resolveChunkIndex } from '../chunk-pipeline';
+import { audioLog } from '../audio-debug';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api';
+
+// How often the time display and word highlighting are refreshed. Redrawing on every animation
+// frame (about 60 times a second) is far more than needed and can make a phone fall behind.
+const UI_UPDATE_INTERVAL_MS = 150;
+
+// Decoded audio is large (a 50-word chunk is several MB once decoded). Chunks further behind the
+// playhead than this are released, so memory does not grow for the whole length of a chapter.
+const KEEP_DECODED_BEHIND = 1;
+
+// If the audio engine stays paused by the system (a call, Siri, switching apps on iOS) for this
+// long while the player says "playing", the player pauses itself so the Play button is honest.
+const INTERRUPTION_GRACE_MS = 2500;
 
 export interface AudioChunk {
   id: string; // empty until the audio for this chunk has been generated
@@ -82,6 +95,8 @@ export function useAudioPlayer({
   const chunksRef = useRef<AudioChunk[]>(chunks);
   const waitingRef = useRef<{ index: number; offset: number } | null>(null);
   const speedRef = useRef<number>(1.0);
+  const lastUiUpdateRef = useRef<number>(0);
+  const notRunningSinceRef = useRef<number | null>(null);
 
   const [state, setState] = useState<AudioPlayerState>({
     isPlaying: false,
@@ -120,12 +135,30 @@ export function useAudioPlayer({
       audioContextRef.current = new AudioContext();
       gainNodeRef.current = audioContextRef.current.createGain();
       gainNodeRef.current.connect(audioContextRef.current.destination);
+      audioLog(
+        `audio engine created: ${audioContextRef.current.state}, ${audioContextRef.current.sampleRate ?? '?'} Hz`
+      );
     }
     // Resume if suspended (browser autoplay policy)
     if (audioContextRef.current.state === 'suspended') {
       audioContextRef.current.resume();
     }
     return audioContextRef.current;
+  }, []);
+
+  // Free decoded audio for chunks well behind the one now playing
+  const releaseDecodedBefore = useCallback((playingIndex: number) => {
+    const limit = playingIndex - KEEP_DECODED_BEHIND;
+    const released: number[] = [];
+    decodedBuffersRef.current.forEach((_buffer, index) => {
+      if (index < limit) released.push(index);
+    });
+    for (const index of released) {
+      decodedBuffersRef.current.delete(index);
+    }
+    if (released.length > 0) {
+      audioLog(`released decoded audio of chunk ${released.join(', ')}`);
+    }
   }, []);
 
   // Fetch and decode a chunk
@@ -159,19 +192,26 @@ export function useAudioPlayer({
 
       const ctx = ensureAudioContext();
       pendingDecodes.current.add(chunkIndex);
+      const startedAt = Date.now();
 
       try {
         const response = await fetch(`${API_URL}/tts/audio/${chunk.id}`);
-        if (!response.ok) throw new Error('Failed to fetch audio');
+        if (!response.ok) throw new Error(`Failed to fetch audio (${response.status})`);
 
         const arrayBuffer = await response.arrayBuffer();
+        const downloadedAt = Date.now();
         const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
         decodedBuffersRef.current.set(chunkIndex, audioBuffer);
         pendingDecodes.current.delete(chunkIndex);
+        audioLog(
+          `chunk ${chunkIndex} ready to play: download ${downloadedAt - startedAt} ms, ` +
+            `decode ${Date.now() - downloadedAt} ms`
+        );
         return audioBuffer;
       } catch (error) {
         pendingDecodes.current.delete(chunkIndex);
+        audioLog(`chunk ${chunkIndex} FAILED to load: ${(error as Error)?.message ?? error}`);
         console.error(`[AudioPlayer] Failed to decode chunk ${chunkIndex}:`, error);
         return null;
       }
@@ -228,6 +268,16 @@ export function useAudioPlayer({
   const playFromChunk = useCallback(
     async (chunkIndex: number, offsetWithinChunk: number = 0) => {
       const ctx = ensureAudioContext();
+      audioLog(`play chunk ${chunkIndex} from ${offsetWithinChunk.toFixed(1)}s (engine ${ctx.state})`);
+
+      // Wait until the audio engine is really running (it starts paused on iOS until a tap)
+      if (ctx.state !== 'running' && ctx.state !== 'closed') {
+        try {
+          await ctx.resume();
+        } catch (error) {
+          audioLog(`audio engine would not start: ${(error as Error)?.message ?? error}`);
+        }
+      }
 
       // Stop current playback
       if (currentSourceRef.current) {
@@ -249,6 +299,7 @@ export function useAudioPlayer({
 
       // The audio for this chunk is not generated yet: wait for it instead of stopping
       if (!isChunkReady(chunksRef.current[chunkIndex])) {
+        audioLog(`waiting for chunk ${chunkIndex} to be generated`);
         waitingRef.current = { index: chunkIndex, offset: offsetWithinChunk };
         currentChunkIndexRef.current = chunkIndex;
         chunkStartOffsetRef.current = offsetWithinChunk;
@@ -290,13 +341,16 @@ export function useAudioPlayer({
       isPlayingRef.current = true;
 
       // Monitor AudioContext state changes - auto-resume if suspended
+      // iOS also reports "interrupted" (a call, Siri, another app took the audio)
       if (ctx.onstatechange === null) {
         ctx.onstatechange = () => {
-          if (ctx.state === 'suspended') {
+          audioLog(`audio engine is now ${ctx.state}`);
+          if (ctx.state !== 'running' && ctx.state !== 'closed') {
             ctx.resume().catch(() => {});
           }
         };
       }
+      releaseDecodedBefore(chunkIndex);
 
       // Handle chunk end - schedule next chunk
       scheduled.source.onended = () => {
@@ -317,6 +371,11 @@ export function useAudioPlayer({
 
           // Play next chunk if we have it buffered
           const nextBuffer = decodedBuffersRef.current.get(nextIndex);
+          audioLog(
+            `chunk ${nextIndex - 1} ended; next chunk ${nextIndex} is ` +
+              (nextBuffer ? 'ready' : isChunkReady(currentChunks[nextIndex]) ? 'generated, still loading' : 'NOT generated yet')
+          );
+          releaseDecodedBefore(nextIndex);
 
           if (nextBuffer) {
             const nextScheduled = scheduleChunk(nextIndex, nextBuffer, 0, ctx.currentTime);
@@ -383,6 +442,7 @@ export function useAudioPlayer({
       onChunkChange,
       onPositionChange,
       preloadChunks,
+      releaseDecodedBefore,
     ]
   );
 
@@ -390,6 +450,13 @@ export function useAudioPlayer({
   useEffect(() => {
     const updateTime = () => {
       if (!isPlayingRef.current || !audioContextRef.current) {
+        animationFrameRef.current = requestAnimationFrame(updateTime);
+        return;
+      }
+
+      // Refresh the display a few times a second, not on every animation frame
+      const nowMs = Date.now();
+      if (nowMs - lastUiUpdateRef.current < UI_UPDATE_INTERVAL_MS) {
         animationFrameRef.current = requestAnimationFrame(updateTime);
         return;
       }
@@ -402,6 +469,7 @@ export function useAudioPlayer({
         animationFrameRef.current = requestAnimationFrame(updateTime);
         return;
       }
+      lastUiUpdateRef.current = nowMs;
 
       // Calculate elapsed time - playbackRate handles speed, so we multiply by speed
       const elapsedReal = ctx.currentTime - playbackStartTimeRef.current;
@@ -479,6 +547,63 @@ export function useAudioPlayer({
       playFromChunk(waiting.index, waiting.offset);
     }
   }, [chunks, playFromChunk]);
+
+  // The system can pause the audio engine while the player thinks it is playing: a call, Siri,
+  // switching apps or locking the screen on iOS. Try to resume it when the app comes back. If it
+  // stays paused, pause the player so the Play button matches reality and a tap restarts playback,
+  // instead of showing "Pause" over silence.
+  useEffect(() => {
+    const tryResume = (reason: string) => {
+      const ctx = audioContextRef.current;
+      if (!ctx || !isPlayingRef.current) return;
+      if (ctx.state !== 'running' && ctx.state !== 'closed') {
+        audioLog(`${reason}: audio engine is ${ctx.state}, trying to resume`);
+        ctx.resume().catch(() => {});
+      }
+    };
+
+    const onVisibilityChange = () => {
+      audioLog(`app is now ${document.visibilityState}`);
+      if (document.visibilityState === 'visible') tryResume('app visible again');
+    };
+    const onPageShow = () => tryResume('page shown');
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('pageshow', onPageShow);
+
+    const watchdog = setInterval(() => {
+      const ctx = audioContextRef.current;
+      if (!ctx || !isPlayingRef.current || ctx.state === 'running' || ctx.state === 'closed') {
+        notRunningSinceRef.current = null;
+        return;
+      }
+
+      const now = Date.now();
+      if (notRunningSinceRef.current === null) {
+        notRunningSinceRef.current = now;
+        return;
+      }
+      if (now - notRunningSinceRef.current < INTERRUPTION_GRACE_MS) return;
+
+      notRunningSinceRef.current = null;
+      audioLog(`audio engine stuck ${ctx.state}: pausing the player (tap Play to continue)`);
+      if (currentSourceRef.current) {
+        try {
+          currentSourceRef.current.stop();
+        } catch (e) {}
+        currentSourceRef.current = null;
+      }
+      waitingRef.current = null;
+      isPlayingRef.current = false;
+      setState((prev) => ({ ...prev, isPlaying: false, isBuffering: false, error: 'interrupted' }));
+    }, 500);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('pageshow', onPageShow);
+      clearInterval(watchdog);
+    };
+  }, []);
 
   // Seek within current chunk
   const seek = useCallback(
