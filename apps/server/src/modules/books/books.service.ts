@@ -3,18 +3,22 @@ import { epubProcessor } from './epub.processor';
 import { pdfProcessor, isPdf } from './pdf.processor';
 import { pdfConverterService } from './pdf-converter.service';
 import { ocrService } from './ocr.service';
+import { audioPrepService } from '../tts/audio-prep.service';
 import { readFile, deleteFile, saveFile } from '../../core/storage';
 import { openLibraryService } from './open-library.service';
+import { groupLikelyDuplicates, pickBookToKeep } from './duplicates';
 import type { AlternativeCover } from '@chapter/types';
 import path from 'path';
 
 export class BooksService {
   async uploadBook(userId: string, fileBuffer: Buffer, filename: string): Promise<any> {
     // PDFs are recognised by their content, not their name
-    const bookId = isPdf(fileBuffer)
-      ? await pdfProcessor.processPDF(userId, fileBuffer, filename)
-      : await epubProcessor.processEPUB(userId, fileBuffer, filename);
-    return await this.getBookById(userId, bookId);
+    const result = isPdf(fileBuffer)
+      ? await pdfProcessor.importPDF(userId, fileBuffer, filename)
+      : await epubProcessor.importEPUB(userId, fileBuffer, filename);
+    const book = await this.getBookById(userId, result.bookId);
+    // When the file was a copy of a book already in the library, say which one
+    return result.duplicateOf ? { ...book, duplicateOf: result.duplicateOf } : book;
   }
 
   async getUserBooks(userId: string): Promise<any[]> {
@@ -165,6 +169,9 @@ export class BooksService {
       });
 
       if (book) {
+        // Stop any audio preparation still running for this book
+        await audioPrepService.cancel(bookId);
+
         // Remove the generated audio files too. Deleting the book removes their database rows,
         // but not the files, which would otherwise stay on disk forever.
         const audioEntries = await prisma.tTSCache.findMany({
@@ -326,6 +333,104 @@ export class BooksService {
       where: { id: bookId },
       data: updateData,
     });
+  }
+
+  /**
+   * Books in this person's library that look like the same book more than once (another format
+   * or edition, a copy from a second folder), with the copy to keep suggested for each group.
+   */
+  async findDuplicateGroups(userId: string) {
+    const links = await prisma.userBook.findMany({
+      where: { userId },
+      select: {
+        isFavorite: true,
+        book: {
+          select: {
+            id: true,
+            title: true,
+            author: true,
+            isbn: true,
+            sourceFormat: true,
+            hasText: true,
+            totalWords: true,
+            fileSize: true,
+            createdAt: true,
+            readingProgress: { where: { userId }, select: { percentage: true }, take: 1 },
+          },
+        },
+      },
+    });
+
+    const ids = links.map((link) => link.book.id);
+    const audio = ids.length
+      ? await prisma.tTSCache.groupBy({
+          by: ['bookId'],
+          where: { bookId: { in: ids } },
+          _count: { _all: true },
+        })
+      : [];
+    const audioByBook = new Map(audio.map((row) => [row.bookId, row._count._all]));
+
+    const candidates = links.map((link) => ({
+      id: link.book.id,
+      title: link.book.title,
+      author: link.book.author,
+      isbn: link.book.isbn,
+      sourceFormat: link.book.sourceFormat,
+      hasText: link.book.hasText,
+      totalWords: link.book.totalWords,
+      fileSize: link.book.fileSize,
+      createdAt: link.book.createdAt,
+      isFavorite: link.isFavorite,
+      progress: link.book.readingProgress[0]?.percentage ?? 0,
+      audioChunks: audioByBook.get(link.book.id) ?? 0,
+    }));
+
+    return groupLikelyDuplicates(candidates).map((group) => ({
+      confidence: group.confidence,
+      keepId: pickBookToKeep(group.books).id,
+      books: group.books,
+    }));
+  }
+
+  /**
+   * Remove duplicate copies, keeping one book per group. The removed copies' generated audio is
+   * deleted with them; a favourite mark moves to the book that is kept. Files in watched folders
+   * are not touched.
+   */
+  async mergeDuplicates(
+    userId: string,
+    merges: Array<{ keepId: string; removeIds: string[] }>
+  ): Promise<{ removed: number }> {
+    let removed = 0;
+
+    for (const merge of merges) {
+      const keep = await prisma.userBook.findUnique({
+        where: { userId_bookId: { userId, bookId: merge.keepId } },
+      });
+      if (!keep) throw new Error('A book to keep was not found in your library');
+
+      let favorite = false;
+      for (const removeId of merge.removeIds) {
+        if (removeId === merge.keepId) continue;
+        const link = await prisma.userBook.findUnique({
+          where: { userId_bookId: { userId, bookId: removeId } },
+        });
+        if (!link) continue;
+        favorite = favorite || link.isFavorite;
+        await this.deleteBook(userId, removeId);
+        removed += 1;
+      }
+
+      if (favorite && !keep.isFavorite) {
+        await prisma.userBook.update({
+          where: { userId_bookId: { userId, bookId: merge.keepId } },
+          data: { isFavorite: true },
+        });
+      }
+    }
+
+    return { removed };
   }
 
   async getMetadataStats(): Promise<{

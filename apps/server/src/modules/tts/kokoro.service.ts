@@ -1,5 +1,6 @@
 import { config } from '../../core/config';
 import { TTSGenerateRequest, TTSGenerateResponse, Voice, KokoroVoice } from '@chapter/types';
+import { encodeMp3 } from './mp3-encoder';
 
 export const KOKORO_VOICES: Voice[] = [
   { id: 'af_bella', name: 'Bella', language: 'en-US', accent: 'american', gender: 'female' },
@@ -45,6 +46,15 @@ export class KokoroService {
       const duration = durationHeader
         ? parseFloat(durationHeader)
         : this.estimateDuration(audioData);
+
+      // Store MP3 when possible: far smaller, so whole books can be kept. If the encoder is not
+      // available or fails, the WAV is kept so audio is never lost.
+      if (config.tts.audioFormat === 'mp3') {
+        const mp3 = await encodeMp3(audioData);
+        if (mp3) {
+          return { audioData: mp3, duration, format: 'mp3', sampleRate: 24000 };
+        }
+      }
 
       return {
         audioData,

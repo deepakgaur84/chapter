@@ -275,13 +275,12 @@ export class LibraryService {
 
     // New book, process it
     const filename = filePath.split('/').pop() || 'unknown';
-    if (isPdf(epubBuffer)) {
-      // Converted to a readable EPUB (or stored as a PDF-only book when it is a scan)
-      await pdfProcessor.processPDF(userId, epubBuffer, filename);
-    } else {
-      await epubProcessor.processEPUB(userId, epubBuffer, filename);
-    }
-    return true;
+    // A PDF is converted to a readable EPUB (or stored as a PDF-only book when it is a scan).
+    // A file that is another copy (format or edition) of a book already in the library is skipped.
+    const result = isPdf(epubBuffer)
+      ? await pdfProcessor.importPDF(userId, epubBuffer, filename)
+      : await epubProcessor.importEPUB(userId, epubBuffer, filename);
+    return result.created;
   }
 
   /**

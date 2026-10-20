@@ -5,7 +5,8 @@
  * how many chunks there are and which ones already have audio. The pipeline then asks the
  * server to generate chunks one at a time:
  *
- *  - While the player is playing it keeps `lookahead` chunks ahead of the playback position.
+ *  - While the player is playing it keeps at least `lookahead` chunks, and about `aheadSeconds`
+ *    seconds of audio, ready ahead of the playback position.
  *  - When the player is paused it generates nothing new. The one exception is the chunk the
  *    player is parked on (for example after opening the book), so Play starts quickly.
  *  - Only one chunk is ever being generated at a time.
@@ -15,6 +16,11 @@
 
 export const WORDS_PER_SECOND = 2.6; // typical narration speed at 1.0x
 export const DEFAULT_LOOKAHEAD = 2;
+// While playing, keep generating until this many seconds of audio are ready beyond the chunk being
+// played (or MAX_AHEAD_CHUNKS chunks ahead). The player waits for part of this before it starts,
+// and the rest keeps it from running dry during playback.
+export const DEFAULT_AHEAD_SECONDS = 120;
+export const MAX_AHEAD_CHUNKS = 12;
 
 export interface PlanChunk {
   index: number;
@@ -59,6 +65,7 @@ export interface PipelineOptions {
   onChange: () => void;
   onError?: (message: string | null) => void;
   lookahead?: number;
+  aheadSeconds?: number; // audio to keep ready ahead while playing (default 120)
   prepareDelayMs?: number; // wait before preparing a parked chunk (absorbs quick seeks)
   maxAttempts?: number;
   retryDelayMs?: number;
@@ -204,14 +211,25 @@ export class ChunkPipeline {
     if (!this.want && !this.prepare) return null;
 
     const lookahead = this.opts.lookahead ?? DEFAULT_LOOKAHEAD;
-    const last = this.want
-      ? Math.min(this.cursor + lookahead, this.plan.total - 1)
-      : this.cursor; // paused: only the chunk the player is parked on
+    const aheadSeconds = this.opts.aheadSeconds ?? DEFAULT_AHEAD_SECONDS;
 
-    for (let i = this.cursor; i <= last; i++) {
-      if (!this.generated.has(i) && !this.blocked.has(i)) {
-        return i;
+    if (!this.want) {
+      // paused: only the chunk the player is parked on
+      const parked = this.cursor;
+      return !this.generated.has(parked) && !this.blocked.has(parked) ? parked : null;
+    }
+
+    let ahead = 0; // seconds of audio already generated beyond the chunk being played
+    for (let i = this.cursor; i < this.plan.total; i++) {
+      const offset = i - this.cursor;
+      if (offset > lookahead && (ahead >= aheadSeconds || offset > MAX_AHEAD_CHUNKS)) break;
+
+      const done = this.generated.get(i);
+      if (done) {
+        if (offset > 0) ahead += done.duration;
+        continue;
       }
+      if (!this.blocked.has(i)) return i;
     }
     return null;
   }

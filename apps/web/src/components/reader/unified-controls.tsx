@@ -112,7 +112,7 @@ export function UnifiedControls({
           />
         </div>
 
-        <div className="max-w-5xl mx-auto px-3 sm:px-6 py-3 sm:py-5">
+        <div className="max-w-5xl mx-auto px-3 sm:px-6 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:py-5">
           <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 sm:gap-8">
             {/* Left: Back button + Book info */}
             <div className="flex items-center gap-2 sm:gap-4 min-w-0">

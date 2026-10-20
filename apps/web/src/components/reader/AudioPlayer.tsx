@@ -267,10 +267,13 @@ export function AudioPlayer({
         {/* Elegant top accent line */}
         <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[hsl(var(--reader-accent))]/30 to-transparent" />
 
-        <div className="max-w-5xl mx-auto px-3 sm:px-6 py-3 sm:py-5">
-          <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2 sm:gap-8">
+        {/* On a phone the controls are two rows (playback on top; back, speed, mode and menu below)
+            so nothing is pushed off the edge. From the `sm` width up it is one row. The bottom
+            padding keeps the buttons clear of the iPhone home indicator. */}
+        <div className="max-w-5xl mx-auto px-3 sm:px-6 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:py-5">
+          <div className="grid grid-cols-2 sm:grid-cols-[auto_1fr_auto] items-center gap-x-2 gap-y-2 sm:gap-8">
             {/* Left: Back button + Book info */}
-            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
+            <div className="order-2 sm:order-1 flex items-center gap-2 sm:gap-4 min-w-0">
               <button
                 onClick={onBack}
                 className="group flex items-center justify-center w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-[hsl(var(--reader-text))]/5 hover:bg-[hsl(var(--reader-text))]/10 transition-all duration-300 hover:scale-105 active:scale-95 shrink-0"
@@ -290,7 +293,7 @@ export function AudioPlayer({
             </div>
 
             {/* Center: Audio playback controls */}
-            <div className="flex items-center justify-center gap-1.5 sm:gap-3">
+            <div className="order-1 sm:order-2 col-span-2 sm:col-span-1 flex items-center justify-center gap-2 sm:gap-3">
               <button
                 onClick={() => controls.seekChapter(Math.max(0, state.chapterCurrentTime - 15))}
                 className="group flex items-center justify-center w-9 h-9 sm:w-11 sm:h-11 rounded-full bg-[hsl(var(--reader-text))]/5 hover:bg-[hsl(var(--reader-text))]/10 transition-all duration-300 hover:scale-105 active:scale-95"
@@ -326,7 +329,7 @@ export function AudioPlayer({
 
               {/* Time display - elapsed time, or the status while audio is being prepared */}
               <div
-                className="flex items-center justify-center min-w-[60px] sm:min-w-[70px] h-9 sm:h-11 px-2.5 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8 select-none"
+                className="flex items-center justify-center min-w-[64px] sm:min-w-[70px] h-9 sm:h-11 px-3 sm:px-4 rounded-full bg-[hsl(var(--reader-text))]/5 border border-[hsl(var(--reader-text))]/8 select-none"
                 title={pipeline.error || undefined}
                 onClick={handleTimeDisplayTap}
               >
@@ -336,14 +339,16 @@ export function AudioPlayer({
                     : state.error === 'interrupted'
                       ? 'Tap play'
                       : state.isBuffering
-                        ? 'Buffering...'
+                        ? state.bufferProgress > 0
+                          ? `Buffering ${Math.round(state.bufferProgress * 100)}%`
+                          : 'Buffering...'
                         : formatTime(state.chapterCurrentTime)}
                 </span>
               </div>
             </div>
 
             {/* Right: Speed + Mode toggle + Menu */}
-            <div className="flex items-center gap-1.5 sm:gap-3">
+            <div className="order-3 justify-self-end flex items-center gap-2 sm:gap-3">
               <Menu.Root>
                 <Menu.Trigger
                   render={

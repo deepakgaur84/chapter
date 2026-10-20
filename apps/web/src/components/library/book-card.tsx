@@ -18,6 +18,9 @@ import {
   Star,
   Trash2,
   FileText,
+  Headphones,
+  Square,
+  AudioLines,
 } from 'lucide-react';
 
 // Global cover URL cache to persist across component mounts/unmounts
@@ -72,6 +75,7 @@ function getBookColor(title: string): string {
 }
 import { useDownload } from '@/lib/hooks/use-download';
 import { useBooks } from '@/lib/hooks/use-books';
+import { useAudioPrep } from '@/lib/hooks/use-audio-prep';
 import { CoverPickerDialog } from './cover-picker-dialog';
 import { MetadataEditorModal } from '../books/metadata-editor-modal';
 import { useQueryClient } from '@tanstack/react-query';
@@ -109,6 +113,16 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [alsoDeleteFile, setAlsoDeleteFile] = useState(false);
   const { downloadBook, isDownloading, progress } = useDownload();
+  const audioPrep = useAudioPrep();
+  const prep = audioPrep.getBook(book.id);
+  const [prepError, setPrepError] = useState<string | null>(null);
+  const prepBusy = prep?.status === 'queued' || prep?.status === 'running';
+  const prepPercent =
+    prep && prep.totalChunks > 0
+      ? Math.min(100, Math.floor((prep.doneChunks / prep.totalChunks) * 100))
+      : 0;
+  const hasAudio = (prep?.audioChunks ?? 0) > 0;
+  const canPrepare = book.hasText !== false;
 
   const loadCover = useCallback(
     async (forceReload = false) => {
@@ -242,6 +256,34 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
     // The card disappears when the books list refreshes, so there is nothing more to reset
   };
 
+  const handlePrepare = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setPrepError(null);
+    try {
+      if (prepBusy) await audioPrep.cancel(book.id);
+      else await audioPrep.prepare(book.id);
+    } catch (error) {
+      setPrepError(error instanceof Error ? error.message : 'Could not prepare audio');
+    }
+  };
+
+  const handleDeleteAudio = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const mb = prep ? Math.round(prep.audioBytes / (1024 * 1024)) : 0;
+    const ok = window.confirm(
+      `Delete the generated audio for "${book.title}"${mb > 0 ? ` (${mb} MB)` : ''}?\n\n` +
+        'The book stays in your library, and it will no longer be included in the nightly audio run. ' +
+        'Audio is generated again when you listen or prepare it again.'
+    );
+    if (!ok) return;
+    setPrepError(null);
+    try {
+      await audioPrep.deleteAudio(book.id);
+    } catch (error) {
+      setPrepError(error instanceof Error ? error.message : 'Could not delete the audio');
+    }
+  };
+
   const handleSaveMetadata = useCallback(
     async (metadata: any) => {
       const bookId = book.id;
@@ -335,6 +377,40 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
               >
                 <FileText className="w-3 h-3" />
                 {book.ocrStatus === 'pending' || book.ocrStatus === 'running' ? 'Scan · OCR' : 'Scan'}
+              </div>
+            )}
+            {/* Audio preparation status */}
+            {prepBusy && (
+              <div
+                data-testid="audio-prep-badge"
+                className="h-6 px-1.5 rounded-full bg-black/70 flex items-center gap-1 text-[10px] font-medium text-white/90 shadow-md"
+                title={
+                  prep?.status === 'queued'
+                    ? 'Waiting to prepare audio'
+                    : `Preparing audio: ${prep?.doneChunks} of ${prep?.totalChunks} pieces`
+                }
+              >
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {prep?.status === 'queued' ? 'Audio · waiting' : `Audio ${prepPercent}%`}
+              </div>
+            )}
+            {!prepBusy && prep?.status === 'failed' && (
+              <div
+                data-testid="audio-prep-failed"
+                className="h-6 px-1.5 rounded-full bg-red-700/90 flex items-center gap-1 text-[10px] font-medium text-white shadow-md"
+                title={prep.error || 'Audio preparation failed'}
+              >
+                <AudioLines className="w-3 h-3" />
+                Audio failed
+              </div>
+            )}
+            {!prepBusy && prep?.status === 'done' && hasAudio && (
+              <div
+                data-testid="audio-prep-done"
+                className="w-6 h-6 rounded-full bg-sky-600 flex items-center justify-center shadow-md"
+                title="Audio ready"
+              >
+                <Headphones className="w-3 h-3 text-white" />
               </div>
             )}
             {/* Downloaded badge - always visible when downloaded */}
@@ -441,6 +517,68 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
                   </Tooltip.Provider>
                 </>
               )}
+              {/* Prepare audio / stop preparing */}
+              {canPrepare && (
+                <>
+                  <div className="w-5 h-px bg-white/10 mx-auto" />
+                  <Tooltip.Provider>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger
+                        className={`flex items-center justify-center w-10 h-10 transition-colors duration-150 ${
+                          prepBusy ? 'text-sky-400 hover:text-sky-300' : 'text-white/60 hover:text-white'
+                        }`}
+                        aria-label={prepBusy ? 'Stop preparing audio' : 'Prepare audio'}
+                        onClick={handlePrepare}
+                      >
+                        {prepBusy ? <Square className="w-4 h-4" /> : <Headphones className="w-4 h-4" />}
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Positioner side="left" sideOffset={8}>
+                          <Tooltip.Popup className="rounded-lg bg-black/90 px-3 py-1.5 text-xs text-white shadow-xl backdrop-blur-sm">
+                            {prepBusy
+                              ? prep?.status === 'queued'
+                                ? 'Cancel (waiting)'
+                                : `Stop preparing (${prepPercent}%)`
+                              : prep?.status === 'done'
+                                ? 'Check audio'
+                                : 'Prepare audio'}
+                          </Tooltip.Popup>
+                        </Tooltip.Positioner>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </Tooltip.Provider>
+                </>
+              )}
+
+              {/* Delete audio - only when audio exists for this book */}
+              {hasAudio && (
+                <>
+                  <div className="w-5 h-px bg-white/10 mx-auto" />
+                  <Tooltip.Provider>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger
+                        className="flex items-center justify-center w-10 h-10 text-white/60 hover:text-red-400 transition-colors duration-150"
+                        aria-label="Delete audio"
+                        onClick={handleDeleteAudio}
+                      >
+                        <span className="relative">
+                          <Headphones className="w-4 h-4" />
+                          <span className="absolute -right-1.5 -bottom-1.5 text-[10px] leading-none font-bold">
+                            ×
+                          </span>
+                        </span>
+                      </Tooltip.Trigger>
+                      <Tooltip.Portal>
+                        <Tooltip.Positioner side="left" sideOffset={8}>
+                          <Tooltip.Popup className="rounded-lg bg-black/90 px-3 py-1.5 text-xs text-white shadow-xl backdrop-blur-sm">
+                            Delete audio
+                          </Tooltip.Popup>
+                        </Tooltip.Positioner>
+                      </Tooltip.Portal>
+                    </Tooltip.Root>
+                  </Tooltip.Provider>
+                </>
+              )}
               {/* Divider */}
               <div className="w-5 h-px bg-white/10 mx-auto" />
 
@@ -469,6 +607,23 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
             </div>
           </div>
 
+          {/* Audio preparation progress bar */}
+          {prepBusy && prep?.status === 'running' && (
+            <div
+              className="absolute bottom-1.5 left-0 right-0 h-1 bg-black/30 z-30"
+              role="progressbar"
+              aria-label="Audio preparation progress"
+              aria-valuenow={prepPercent}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              <div
+                className="h-full bg-sky-400 transition-all duration-500"
+                style={{ width: `${prepPercent}%` }}
+              />
+            </div>
+          )}
+
           {/* Download progress bar */}
           {isDownloading && (
             <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/30 backdrop-blur-sm">
@@ -480,6 +635,12 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
           )}
         </div>
       </div>
+
+      {prepError && (
+        <p className="mt-1 text-xs text-red-400" role="alert">
+          {prepError}
+        </p>
+      )}
 
       {/* Delete confirmation */}
       {showDeleteConfirm &&

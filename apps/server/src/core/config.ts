@@ -29,6 +29,11 @@ export const config = {
   tts: {
     kokoroServiceUrl: process.env.KOKORO_SERVICE_URL || 'http://kokoro:5000',
     defaultVoice: process.env.TTS_DEFAULT_VOICE || 'af_bella',
+    // Generated speech is stored as MP3 (about 6 times smaller than WAV). Set AUDIO_FORMAT=wav to
+    // keep WAV. MP3 needs ffmpeg in the server image; without it the server falls back to WAV.
+    audioFormat: (process.env.AUDIO_FORMAT || 'mp3').toLowerCase() === 'wav' ? 'wav' : 'mp3',
+    mp3Bitrate: process.env.AUDIO_MP3_BITRATE || '64k',
+    ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
   },
 
   upload: {

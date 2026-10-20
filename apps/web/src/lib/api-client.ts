@@ -15,6 +15,61 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
+
+export type AudioPrepStatus = 'idle' | 'queued' | 'running' | 'done' | 'failed';
+
+export interface AudioPrepBook {
+  id: string;
+  title: string;
+  author: string | null;
+  hasText: boolean;
+  selected: boolean;
+  status: AudioPrepStatus;
+  doneChunks: number;
+  totalChunks: number;
+  voiceId: string | null;
+  error: string | null;
+  audioChunks: number;
+  audioBytes: number;
+}
+
+export interface AudioPrepSettings {
+  id: string;
+  enabled: boolean;
+  time: string;
+  timezone: string;
+  voiceId: string;
+  speed: number;
+  temperature: number;
+  lastRunDate: string | null;
+  lastRunAt: string | null;
+  lastRunNote: string | null;
+}
+
+export interface AudioPrepOverview {
+  settings: AudioPrepSettings;
+  running: string | null;
+  books: AudioPrepBook[];
+}
+
+export interface DuplicateGroup {
+  confidence: 'sure' | 'check';
+  keepId: string;
+  books: Array<{
+    id: string;
+    title: string;
+    author: string | null;
+    isbn?: string | null;
+    hasText?: boolean;
+    progress?: number;
+    audioChunks?: number;
+    sourceFormat?: string | null;
+    fileSize?: number | null;
+    createdAt?: string | null;
+    isFavorite?: boolean;
+  }>;
+}
+
 /** What happened to the original files when a book was deleted with the folder option. */
 export interface DeleteBookResult {
   deleted: number;
@@ -291,6 +346,63 @@ class APIClient {
 
   async clearAudioCache(): Promise<{ success: boolean; message: string }> {
     return this.request('/tts/cache', { method: 'DELETE' });
+  }
+
+  // ---- Prepared audio -------------------------------------------------------------------------
+  async getAudioPrep(): Promise<AudioPrepOverview> {
+    return this.request<AudioPrepOverview>('/audio-prep');
+  }
+
+  async updateAudioPrepSettings(
+    settings: Partial<
+      Pick<AudioPrepSettings, 'enabled' | 'time' | 'timezone' | 'voiceId' | 'speed' | 'temperature'>
+    >
+  ): Promise<AudioPrepSettings> {
+    return this.request<AudioPrepSettings>('/audio-prep/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async setAudioPrepSelection(bookIds: string[], selected: boolean, voice?: any): Promise<any> {
+    return this.request('/audio-prep/selection', {
+      method: 'PUT',
+      body: JSON.stringify({ bookIds, selected, voice }),
+    });
+  }
+
+  async runAudioPrepNow(): Promise<any> {
+    return this.request('/audio-prep/run', { method: 'POST' });
+  }
+
+  async prepareBookAudio(
+    bookId: string,
+    voice: { voiceId: string; speed: number; temperature: number }
+  ): Promise<any> {
+    return this.request(`/audio-prep/books/${bookId}/prepare`, {
+      method: 'POST',
+      body: JSON.stringify(voice),
+    });
+  }
+
+  async cancelBookAudio(bookId: string): Promise<any> {
+    return this.request(`/audio-prep/books/${bookId}/cancel`, { method: 'POST' });
+  }
+
+  async deleteBookAudio(bookId: string): Promise<any> {
+    return this.request(`/audio-prep/books/${bookId}/audio`, { method: 'DELETE' });
+  }
+
+  // ---- Duplicates -----------------------------------------------------------------------------
+  async getDuplicateGroups(): Promise<{ groups: DuplicateGroup[] }> {
+    return this.request('/books/maintenance/duplicates');
+  }
+
+  async mergeDuplicates(merges: Array<{ keepId: string; removeIds: string[] }>): Promise<any> {
+    return this.request('/books/maintenance/merge-duplicates', {
+      method: 'POST',
+      body: JSON.stringify({ merges }),
+    });
   }
 
   async getUserSettings(): Promise<UserSettings> {

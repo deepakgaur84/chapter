@@ -4,6 +4,7 @@ import { config } from '../../core/config';
 import { saveFile, readFile, deleteFile, getFileSize } from '../../core/storage';
 import { kokoroService } from './kokoro.service';
 import { createCacheHash, TextChunk } from './chunker';
+import { beginInteractive, endInteractive } from './generation-activity';
 import type { KokoroVoice, TTSSettings } from '@chapter/types';
 
 export interface GenerateAudioOptions {
@@ -167,8 +168,29 @@ export class AudioCacheService {
     return result._sum.audioSize || 0;
   }
 
+  /**
+   * Books whose audio must never be evicted: ones the person asked to prepare (queued, running,
+   * done) or ticked for the scheduled run. Their audio does not count toward the cache limit.
+   */
+  async getProtectedBookIds(): Promise<string[]> {
+    const rows = await prisma.audioPrep.findMany({
+      where: {
+        OR: [{ selected: true }, { status: { in: ['queued', 'running', 'done'] } }],
+      },
+      select: { bookId: true },
+    });
+    return rows.map((row) => row.bookId);
+  }
+
   private async evictIfNeeded(): Promise<void> {
-    const currentSize = await this.getCacheSize();
+    const protectedIds = await this.getProtectedBookIds();
+    const unprotected = protectedIds.length > 0 ? { bookId: { notIn: protectedIds } } : {};
+
+    const result = await prisma.tTSCache.aggregate({
+      where: unprotected,
+      _sum: { audioSize: true },
+    });
+    const currentSize = result._sum.audioSize || 0;
 
     if (currentSize <= this.maxCacheSize) {
       return;
@@ -177,6 +199,7 @@ export class AudioCacheService {
     const sizeToFree = currentSize - this.maxCacheSize;
 
     const entriesToEvict = await prisma.tTSCache.findMany({
+      where: unprotected,
       orderBy: {
         lastAccessed: 'asc',
       },
@@ -203,6 +226,25 @@ export class AudioCacheService {
     }
 
     console.log(`Evicted ${freedSize} bytes from TTS cache`);
+  }
+
+  /** Delete all stored audio of one book (files and rows). Returns how many chunks were removed. */
+  async deleteBookAudio(bookId: string): Promise<number> {
+    const entries = await prisma.tTSCache.findMany({
+      where: { bookId },
+      select: { id: true, audioPath: true },
+    });
+
+    for (const entry of entries) {
+      try {
+        await deleteFile(entry.audioPath);
+      } catch (error) {
+        console.error('Failed to delete audio file:', error);
+      }
+    }
+
+    await prisma.tTSCache.deleteMany({ where: { bookId } });
+    return entries.length;
   }
 
   async streamAudio(cacheId: string): Promise<Buffer> {
@@ -283,15 +325,21 @@ export class AudioCacheService {
     voiceId: KokoroVoice,
     settings?: TTSSettings
   ): Promise<CachedAudio> {
-    return this.getOrGenerateAudio({
-      text: chunk.text,
-      voiceId,
-      settings,
-      bookId,
-      chapterId,
-      startPosition: chunk.startPosition,
-      endPosition: chunk.endPosition,
-    });
+    // Someone is listening: the background "prepare audio" job steps aside while this runs
+    beginInteractive();
+    try {
+      return await this.getOrGenerateAudio({
+        text: chunk.text,
+        voiceId,
+        settings,
+        bookId,
+        chapterId,
+        startPosition: chunk.startPosition,
+        endPosition: chunk.endPosition,
+      });
+    } finally {
+      endInteractive();
+    }
   }
 
   async getCacheStats() {
@@ -329,6 +377,11 @@ export class AudioCacheService {
     }
 
     await prisma.tTSCache.deleteMany();
+
+    // Nothing is prepared any more
+    await prisma.audioPrep.updateMany({
+      data: { status: 'idle', doneChunks: 0, totalChunks: 0, error: null },
+    });
   }
 }
 

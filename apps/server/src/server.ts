@@ -4,6 +4,7 @@ import { connectDatabase, disconnectDatabase } from './core/database';
 import { disconnectRedis } from './core/redis';
 import { ensureStorageDirectories } from './core/storage';
 import { ocrService } from './modules/books/ocr.service';
+import { audioPrepService } from './modules/tts/audio-prep.service';
 
 async function start() {
   try {
@@ -32,6 +33,11 @@ async function start() {
     // Pick up scanned PDFs whose text recognition was interrupted by a restart
     ocrService.resumePending().catch((error) => {
       console.error('Could not resume text recognition:', error);
+    });
+
+    // Start the "prepare audio" schedule, and continue any preparation a restart interrupted
+    audioPrepService.start().catch((error) => {
+      console.error('Could not start the audio preparation schedule:', error);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

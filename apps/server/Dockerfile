@@ -43,6 +43,9 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# ffmpeg turns generated speech into MP3 (about 6 times smaller than WAV)
+RUN apk add --no-cache ffmpeg
+
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 chapter

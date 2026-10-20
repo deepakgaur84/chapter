@@ -4,6 +4,7 @@ import { kokoroService } from './kokoro.service';
 import { audioCacheService } from './audio-cache.service';
 import { ttsChunker, createCacheHash } from './chunker';
 import { prisma } from '../../core/database';
+import { audioMimeType } from './mp3-encoder';
 
 const generateChapterSchema = z.object({
   voiceId: z.string(),
@@ -86,7 +87,7 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
       const audioBuffer = result.audioData;
 
       return reply
-        .header('Content-Type', 'audio/wav')
+        .header('Content-Type', audioMimeType(result.format))
         .header('Content-Length', audioBuffer.length)
         .send(audioBuffer);
     } catch (error) {
@@ -196,7 +197,7 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
           .header('Content-Range', `bytes ${start}-${end}/${audioBuffer.length}`)
           .header('Accept-Ranges', 'bytes')
           .header('Content-Length', chunkSize)
-          .header('Content-Type', `audio/${cached.audioFormat}`)
+          .header('Content-Type', audioMimeType(cached.audioFormat))
           .header('Access-Control-Allow-Origin', '*')
           .header('Access-Control-Allow-Methods', 'GET, OPTIONS')
           .header('Access-Control-Allow-Headers', 'Range')
@@ -204,7 +205,7 @@ export const ttsRoutes: FastifyPluginAsync = async (app) => {
       }
 
       return reply
-        .header('Content-Type', `audio/${cached.audioFormat}`)
+        .header('Content-Type', audioMimeType(cached.audioFormat))
         .header('Content-Length', audioBuffer.length)
         .header('X-Audio-Duration', cached.audioDuration.toString())
         .header('Access-Control-Allow-Origin', '*')

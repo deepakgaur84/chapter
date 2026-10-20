@@ -9,6 +9,8 @@ import { useTTS } from '@/lib/hooks/use-tts';
 import { useSettingsStore, type Theme, type FontSize } from '@/lib/stores/settings-store';
 import { apiClient } from '@/lib/api-client';
 import { LibraryFolders } from '@/components/library/library-folders';
+import { AudioPrepSettings } from '@/components/settings/audio-prep-settings';
+import { DuplicateBooks } from '@/components/settings/duplicate-books';
 import {
   ArrowLeft,
   Volume2,
@@ -385,6 +387,12 @@ export default function SettingsPage() {
             </div>
           </section>
 
+          {/* Prepared Audio Section */}
+          <section className="mb-8">
+            <h2 className="text-lg font-semibold mb-4 text-white/90">Prepared Audio</h2>
+            <AudioPrepSettings />
+          </section>
+
           {/* Reading Section */}
           <section className="mb-8">
             <h2 className="text-lg font-semibold mb-4 text-white/90">Reading</h2>
@@ -464,9 +472,12 @@ export default function SettingsPage() {
           </section>
 
           {/* Maintenance Section */}
+          <section className="mb-8">
+            <h2 className="text-lg font-semibold mb-4 text-white/90">Maintenance</h2>
+            <div className="space-y-4">
+              <DuplicateBooks />
           {metadataStats && metadataStats.bloatedBooks > 0 && (
-            <section className="mb-8">
-              <h2 className="text-lg font-semibold mb-4 text-white/90">Maintenance</h2>
+            <div>
               <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                 <div className="flex items-center justify-between">
                   <div>
@@ -491,8 +502,10 @@ export default function SettingsPage() {
                   )}
                 </div>
               </div>
-            </section>
+            </div>
           )}
+            </div>
+          </section>
 
           {/* Info Section */}
           <section>

@@ -91,6 +91,40 @@ export const booksRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
+  // Books that look like the same book more than once
+  app.get('/maintenance/duplicates', async (request, reply) => {
+    try {
+      const userId = (request.user as any).userId;
+      return reply.send({ groups: await booksService.findDuplicateGroups(userId) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to look for duplicates';
+      return reply.code(500).send({ error: message });
+    }
+  });
+
+  // Remove duplicate copies, keeping one per group
+  app.post('/maintenance/merge-duplicates', async (request, reply) => {
+    try {
+      const userId = (request.user as any).userId;
+      const { merges } = request.body as {
+        merges?: Array<{ keepId?: string; removeIds?: string[] }>;
+      };
+      const valid = (merges || []).filter(
+        (m): m is { keepId: string; removeIds: string[] } =>
+          typeof m.keepId === 'string' &&
+          Array.isArray(m.removeIds) &&
+          m.removeIds.every((id) => typeof id === 'string')
+      );
+      if (valid.length === 0) {
+        return reply.code(400).send({ error: 'Nothing to merge' });
+      }
+      return reply.send(await booksService.mergeDuplicates(userId, valid));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to merge duplicates';
+      return reply.code(500).send({ error: message });
+    }
+  });
+
   app.get('/maintenance/metadata-stats', async (request, reply) => {
     try {
       const stats = await booksService.getMetadataStats();

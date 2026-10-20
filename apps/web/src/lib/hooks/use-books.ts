@@ -110,6 +110,14 @@ export function useBooks() {
 
           const result = await apiClient.uploadBook(file);
 
+          // The server recognised this as a copy of a book already in the library and skipped it
+          if (result?.duplicateOf) {
+            const original = result.duplicateOf.title || 'a book already in your library';
+            window.alert(
+              `"${file.name}" was not added: it looks like a copy of "${original}", which is already in your library.`
+            );
+          }
+
           // Mark as done
           updateUpload(uploadId, { status: 'done' });
 

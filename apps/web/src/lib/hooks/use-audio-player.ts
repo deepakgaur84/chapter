@@ -16,6 +16,11 @@ const KEEP_DECODED_BEHIND = 1;
 // long while the player says "playing", the player pauses itself so the Play button is honest.
 const INTERRUPTION_GRACE_MS = 2500;
 
+// Playback starts (and restarts after running dry) only once this many seconds of audio are ready
+// ahead of the listening position, unless the rest of the chapter is already ready. Starting on
+// the first piece and then stopping for every next piece is far more irritating than one wait.
+export const DEFAULT_BUFFER_SECONDS = 45;
+
 export interface AudioChunk {
   id: string; // empty until the audio for this chunk has been generated
   index: number;
@@ -32,13 +37,32 @@ function isChunkReady(chunk?: AudioChunk): boolean {
   return !!chunk && !!chunk.id && chunk.ready !== false;
 }
 
+/**
+ * How much audio is ready from a position onwards: real seconds at the current speed, and
+ * whether everything up to the end of the chapter is ready.
+ */
+export function bufferedAhead(
+  chunks: AudioChunk[],
+  index: number,
+  offset: number,
+  speed: number
+): { seconds: number; allReady: boolean } {
+  let audioSeconds = 0;
+  let i = index;
+  for (; i < chunks.length && isChunkReady(chunks[i]); i++) {
+    audioSeconds += Math.max(0, chunks[i].audioDuration - (i === index ? offset : 0));
+  }
+  return { seconds: audioSeconds / (speed > 0 ? speed : 1), allReady: i >= chunks.length };
+}
+
 export interface AudioPlayerState {
   isPlaying: boolean;
   currentTime: number;
   duration: number;
   buffered: number;
   isLoading: boolean;
-  isBuffering: boolean; // waiting for the next chunk to be generated
+  isBuffering: boolean; // waiting for audio to be generated
+  bufferProgress: number; // 0..1 while buffering: how much of the wanted head start is ready
   speed: number;
   volume: number;
   currentChunkIndex: number;
@@ -57,6 +81,8 @@ export interface UseAudioPlayerOptions {
   onChunkNeeded?: (chunkIndex: number) => Promise<void>;
   initialChunkId?: string;
   initialTime?: number;
+  /** Seconds of audio to have ready before playing (default 45). 0 plays as soon as one piece is ready. */
+  bufferSeconds?: number;
 }
 
 interface DecodedChunk {
@@ -73,6 +99,7 @@ export function useAudioPlayer({
   onChunkNeeded,
   initialChunkId,
   initialTime,
+  bufferSeconds = DEFAULT_BUFFER_SECONDS,
 }: UseAudioPlayerOptions) {
   // Web Audio API refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -97,6 +124,8 @@ export function useAudioPlayer({
   const speedRef = useRef<number>(1.0);
   const lastUiUpdateRef = useRef<number>(0);
   const notRunningSinceRef = useRef<number | null>(null);
+  const bufferSecondsRef = useRef<number>(bufferSeconds);
+  bufferSecondsRef.current = bufferSeconds;
 
   const [state, setState] = useState<AudioPlayerState>({
     isPlaying: false,
@@ -105,6 +134,7 @@ export function useAudioPlayer({
     buffered: 0,
     isLoading: false,
     isBuffering: false,
+    bufferProgress: 0,
     speed: 1.0,
     volume: 1.0,
     currentChunkIndex: 0,
@@ -238,7 +268,9 @@ export function useAudioPlayer({
   // When more chunks become ready during playback, start decoding the next ones
   useEffect(() => {
     if (isPlayingRef.current || waitingRef.current) {
-      preloadChunks(currentChunkIndexRef.current + 1, 3);
+      // While waiting, the chunk we will start on is decoded too, so playback starts at once
+      const from = waitingRef.current ? currentChunkIndexRef.current : currentChunkIndexRef.current + 1;
+      preloadChunks(from, 3);
     }
   }, [chunks, preloadChunks]);
 
@@ -297,9 +329,17 @@ export function useAudioPlayer({
 
       waitingRef.current = null;
 
-      // The audio for this chunk is not generated yet: wait for it instead of stopping
-      if (!isChunkReady(chunksRef.current[chunkIndex])) {
-        audioLog(`waiting for chunk ${chunkIndex} to be generated`);
+      // Not enough audio is ready yet: wait (showing how far along it is) instead of starting and
+      // then stopping again after every piece. A chunk that is not generated yet also waits here.
+      const ahead = bufferedAhead(chunksRef.current, chunkIndex, offsetWithinChunk, speedRef.current);
+      const wanted = bufferSecondsRef.current;
+      const chunkReady = isChunkReady(chunksRef.current[chunkIndex]);
+      if (!chunkReady || (!ahead.allReady && ahead.seconds < wanted)) {
+        audioLog(
+          chunkReady
+            ? `buffering: ${ahead.seconds.toFixed(0)}s of ${wanted}s ready from chunk ${chunkIndex}`
+            : `waiting for chunk ${chunkIndex} to be generated`
+        );
         waitingRef.current = { index: chunkIndex, offset: offsetWithinChunk };
         currentChunkIndexRef.current = chunkIndex;
         chunkStartOffsetRef.current = offsetWithinChunk;
@@ -308,6 +348,7 @@ export function useAudioPlayer({
           ...prev,
           isPlaying: true,
           isBuffering: true,
+          bufferProgress: wanted > 0 ? Math.min(1, ahead.seconds / wanted) : 0,
           isLoading: false,
           currentChunkIndex: chunkIndex,
           currentTime: offsetWithinChunk,
@@ -402,7 +443,7 @@ export function useAudioPlayer({
           }
 
           // Preload more chunks
-          preloadChunks(nextIndex + 1, 2);
+          preloadChunks(nextIndex + 1, 3);
         } else {
           // End of available chunks
           isPlayingRef.current = false;
@@ -415,6 +456,7 @@ export function useAudioPlayer({
         isPlaying: true,
         isLoading: false,
         isBuffering: false,
+        bufferProgress: 0,
         error: null,
         currentChunkIndex: chunkIndex,
         currentTime: offsetWithinChunk,
@@ -431,7 +473,7 @@ export function useAudioPlayer({
       }
 
       // Preload next chunks
-      preloadChunks(chunkIndex + 1, 2);
+      preloadChunks(chunkIndex + 1, 3);
     },
     [
       ensureAudioContext,
@@ -539,12 +581,19 @@ export function useAudioPlayer({
     setState((prev) => ({ ...prev, isPlaying: false, isBuffering: false }));
   }, []);
 
-  // Start playing as soon as a chunk we were waiting for has been generated
+  // Start playing once enough audio is ready (or the rest of the chapter is), and show progress
   useEffect(() => {
     const waiting = waitingRef.current;
-    if (waiting && isChunkReady(chunks[waiting.index])) {
+    if (!waiting) return;
+    const ahead = bufferedAhead(chunks, waiting.index, waiting.offset, speedRef.current);
+    const wanted = bufferSecondsRef.current;
+    const ready = isChunkReady(chunks[waiting.index]);
+    if (ready && (ahead.allReady || ahead.seconds >= wanted)) {
       waitingRef.current = null;
       playFromChunk(waiting.index, waiting.offset);
+    } else {
+      const progress = wanted > 0 ? Math.min(1, ahead.seconds / wanted) : 0;
+      setState((prev) => (prev.bufferProgress === progress ? prev : { ...prev, bufferProgress: progress }));
     }
   }, [chunks, playFromChunk]);
 

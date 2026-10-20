@@ -76,6 +76,7 @@ model Book {
   updatedAt   DateTime @updatedAt
 
   // Relations
+  audioPrep       AudioPrep?
   chapters        Chapter[]
   userBooks       UserBook[]
   readingProgress ReadingProgress[]
@@ -273,4 +274,36 @@ model WatchedFolder {
   @@unique([userId, path])
   @@index([userId])
   @@index([isActive])
+}
+
+
+// "Prepare audio": generating every audio chunk of a book ahead of time, so listening is seamless
+model AudioPrep {
+  bookId      String   @id
+  book        Book     @relation(fields: [bookId], references: [id], onDelete: Cascade)
+
+  selected    Boolean  @default(false) // included in the scheduled (nightly) run
+  // idle | queued | running | done | failed
+  status      String   @default("idle")
+  doneChunks  Int      @default(0)
+  totalChunks Int      @default(0)
+  voiceId     String? // voice the audio was prepared with
+  error       String?
+
+  updatedAt   DateTime @updatedAt
+}
+
+// One row ("global"): when the scheduled run happens, and the voice settings it generates with
+model AudioPrepSettings {
+  id          String  @id @default("global")
+  enabled     Boolean @default(false)
+  time        String  @default("03:00") // HH:MM, in `timezone`
+  timezone    String  @default("UTC")
+  voiceId     String  @default("am_michael")
+  speed       Float   @default(1.0)
+  temperature Float   @default(0.7)
+
+  lastRunDate String? // YYYY-MM-DD (in `timezone`) of the last scheduled run
+  lastRunAt   DateTime?
+  lastRunNote String?
 }

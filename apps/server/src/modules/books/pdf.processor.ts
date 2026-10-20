@@ -3,7 +3,7 @@ import path from 'path';
 import { prisma } from '../../core/database';
 import { config } from '../../core/config';
 import { saveFile, deleteFile } from '../../core/storage';
-import { epubProcessor } from './epub.processor';
+import { epubProcessor, type ImportResult } from './epub.processor';
 import { pdfConverterService } from './pdf-converter.service';
 import { ocrService } from './ocr.service';
 
@@ -25,12 +25,17 @@ export class PDFProcessor {
    * again is recognised, and the original can be found again in a watched folder.
    */
   async processPDF(userId: string, pdfBuffer: Buffer, filename: string): Promise<string> {
+    return (await this.importPDF(userId, pdfBuffer, filename)).bookId;
+  }
+
+  /** Like processPDF, but says whether a book was added or the file was a duplicate */
+  async importPDF(userId: string, pdfBuffer: Buffer, filename: string): Promise<ImportResult> {
     const fileHash = crypto.createHash('sha256').update(pdfBuffer).digest('hex');
 
     const existing = await prisma.book.findUnique({ where: { fileHash } });
     if (existing) {
       await epubProcessor.linkBookToUser(userId, existing.id);
-      return existing.id;
+      return { bookId: existing.id, created: false };
     }
 
     const converted = await pdfConverterService.convert(pdfBuffer, filename);
@@ -40,14 +45,22 @@ export class PDFProcessor {
 
     try {
       if (converted.hasText && converted.epub) {
-        return await epubProcessor.processEPUB(userId, converted.epub, filename, {
+        const result = await epubProcessor.importEPUB(userId, converted.epub, filename, {
           fileHash,
           fileSize: pdfBuffer.length,
           pdfPath,
         });
+        if (!result.created) {
+          // A copy of a book already in the library: the stored PDF is not needed
+          await deleteFile(pdfPath);
+        }
+        return result;
       }
 
-      return await this.createScannedBook(userId, pdfBuffer, pdfPath, fileHash, converted);
+      return {
+        bookId: await this.createScannedBook(userId, pdfBuffer, pdfPath, fileHash, converted),
+        created: true,
+      };
     } catch (error) {
       await deleteFile(pdfPath);
       throw error;
