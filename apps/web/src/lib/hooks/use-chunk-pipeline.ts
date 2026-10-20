@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { audioLog } from '../audio-debug';
 import {
   ChunkPipeline,
   type GeneratedChunk,
@@ -106,20 +107,33 @@ export function useChunkPipeline({
         onChange: () => setVersion((v) => v + 1),
         onError: (message) => setError(message),
         generateChunk: async (index, signal): Promise<GeneratedChunk> => {
-          const result = await fetch(
-            `${API_URL}/tts/chapters/${bookId}/${chapterId}/chunk/${index}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', ...authHeaders() },
-              body: JSON.stringify({ voiceId, settings }),
-              signal,
+          const startedAt = Date.now();
+          audioLog(`generating chunk ${index}...`);
+          try {
+            const result = await fetch(
+              `${API_URL}/tts/chapters/${bookId}/${chapterId}/chunk/${index}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ voiceId, settings }),
+                signal,
+              }
+            );
+            if (!result.ok) {
+              throw new Error(await readError(result, 'Failed to generate audio'));
             }
-          );
-          if (!result.ok) {
-            throw new Error(await readError(result, 'Failed to generate audio'));
+            const body = await result.json();
+            audioLog(`chunk ${index} generated in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+            return { id: body.id, duration: body.duration, size: body.size };
+          } catch (error) {
+            if (!signal.aborted) {
+              audioLog(
+                `chunk ${index} generation FAILED after ${((Date.now() - startedAt) / 1000).toFixed(1)}s: ` +
+                  `${(error as Error)?.message ?? error}`
+              );
+            }
+            throw error;
           }
-          const body = await result.json();
-          return { id: body.id, duration: body.duration, size: body.size };
         },
       });
 
