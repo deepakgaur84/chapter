@@ -15,6 +15,12 @@ import { ReadAlongView } from '@/components/reader/ReadAlongView';
 import { UnifiedControls } from '@/components/reader/unified-controls';
 import { readingToAudioPosition, audioToReadingPosition } from '@/lib/position-sync';
 import { chunkKey, resolveChunkIndex } from '@/lib/chunk-pipeline';
+import {
+  getVisibleChapterIndexes,
+  getChapterPosition,
+  getPrevVisible,
+  getNextVisible,
+} from '@/lib/visible-chapters';
 
 export default function ReaderPage() {
   const params = useParams();
@@ -40,6 +46,15 @@ export default function ReaderPage() {
   // Get chapter ID from structure
   const chapterId = structure?.chapters[currentChapter]?.id;
 
+  // Chapters with no words (cover pages, image-only pages) are hidden from the table of contents
+  // and skipped by previous/next. `currentChapter` stays the real index; only the counts shown
+  // ("Chapter X of Y") and the progress percentage use the visible chapters.
+  const visibleIndexes = structure ? getVisibleChapterIndexes(structure.chapters) : [];
+  const visibleCount = visibleIndexes.length;
+  const chapterPosition = getChapterPosition(visibleIndexes, currentChapter);
+  const prevVisibleChapter = getPrevVisible(visibleIndexes, currentChapter);
+  const nextVisibleChapter = getNextVisible(visibleIndexes, currentChapter);
+
   // Plan of the chapter's audio chunks. Audio is generated a few chunks at a time, only while
   // the player is playing (see AudioPlayer), instead of all at once.
   const pipeline = useChunkPipeline({
@@ -62,12 +77,11 @@ export default function ReaderPage() {
           chapterIndex: currentChapter,
           chapterId: chapterId,
           scrollPosition: percentage,
-          percentage:
-            ((currentChapter + percentage / 100) / (structure?.chapters.length || 1)) * 100,
+          percentage: ((chapterPosition + percentage / 100) / (visibleCount || 1)) * 100,
         });
       }
     },
-    [currentChapter, chapterId, structure, updateProgress, mode]
+    [currentChapter, chapterId, chapterPosition, visibleCount, updateProgress, mode]
   );
 
   const handlePositionChange = useCallback(
@@ -159,8 +173,8 @@ export default function ReaderPage() {
   }
 
   const goToPrevChapter = () => {
-    if (currentChapter > 0) {
-      const newChapter = currentChapter - 1;
+    if (prevVisibleChapter !== null) {
+      const newChapter = prevVisibleChapter;
       setCurrentChapter(newChapter);
       setCurrentScrollProgress(0);
       updateProgress({
@@ -173,8 +187,8 @@ export default function ReaderPage() {
   };
 
   const goToNextChapter = () => {
-    if (structure && currentChapter < structure.chapters.length - 1) {
-      const newChapter = currentChapter + 1;
+    if (structure && nextVisibleChapter !== null) {
+      const newChapter = nextVisibleChapter;
       setCurrentChapter(newChapter);
       setCurrentScrollProgress(0);
       updateProgress({
@@ -252,7 +266,7 @@ export default function ReaderPage() {
   const currentChapterData = structure?.chapters[currentChapter];
 
   const estimatedProgress = structure
-    ? ((currentChapter + currentScrollProgress / 100) / structure.chapters.length) * 100
+    ? ((chapterPosition + currentScrollProgress / 100) / (visibleCount || 1)) * 100
     : progress?.percentage || 0;
 
   return (
@@ -306,15 +320,15 @@ export default function ReaderPage() {
       {mode === 'reading' ? (
         <UnifiedControls
           book={book}
-          currentChapter={currentChapter}
-          totalChapters={structure?.chapters.length || 0}
+          currentChapter={chapterPosition}
+          totalChapters={visibleCount}
           bookProgress={estimatedProgress}
           onBack={() => router.push('/library')}
           onToggleNav={() => setShowNav(!showNav)}
           onPrevChapter={goToPrevChapter}
           onNextChapter={goToNextChapter}
-          hasPrev={currentChapter > 0}
-          hasNext={structure ? currentChapter < structure.chapters.length - 1 : false}
+          hasPrev={prevVisibleChapter !== null}
+          hasNext={nextVisibleChapter !== null}
           mode={mode}
           onModeChange={handleModeChange}
           disableListening={!isOnline}
@@ -330,8 +344,8 @@ export default function ReaderPage() {
           initialChunkId={currentAudioChunk || undefined}
           initialTime={currentAudioTime || undefined}
           book={book}
-          currentChapter={currentChapter}
-          totalChapters={structure?.chapters.length || 0}
+          currentChapter={chapterPosition}
+          totalChapters={visibleCount}
           onBack={() => router.push('/library')}
           onToggleNav={() => setShowNav(!showNav)}
           mode={mode}
