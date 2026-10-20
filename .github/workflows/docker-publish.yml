@@ -65,6 +65,9 @@ jobs:
           - image: chapter-kokoro
             dockerfile: services/kokoro/Dockerfile
             context: services/kokoro
+          - image: chapter-pdf2epub
+            dockerfile: services/pdf2epub/Dockerfile
+            context: services/pdf2epub
 
     steps:
       - name: Checkout repository
