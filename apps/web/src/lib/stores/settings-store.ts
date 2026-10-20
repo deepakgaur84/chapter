@@ -25,7 +25,7 @@ export const useSettingsStore = create<SettingsState>()(
       theme: 'dark',
       fontSize: 'medium',
       tts: {
-        voiceId: 'af_bella',
+        voiceId: 'am_michael',
         speed: 1.0,
         temperature: 0.7,
       },
