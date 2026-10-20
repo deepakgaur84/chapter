@@ -15,6 +15,12 @@ import type {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
+/** What happened to the original files when a book was deleted with the folder option. */
+export interface DeleteBookResult {
+  deleted: number;
+  failed: { path: string; error: string }[];
+}
+
 class APIClient {
   private token: string | null = null;
 
@@ -147,10 +153,12 @@ class APIClient {
     return response.blob();
   }
 
-  async deleteBook(bookId: string): Promise<void> {
-    await this.request<void>(`/books/${bookId}`, {
+  async deleteBook(bookId: string, deleteSourceFiles = false): Promise<DeleteBookResult> {
+    const query = deleteSourceFiles ? '?deleteSourceFiles=true' : '';
+    const result = await this.request<Partial<DeleteBookResult>>(`/books/${bookId}${query}`, {
       method: 'DELETE',
     });
+    return { deleted: result.deleted ?? 0, failed: result.failed ?? [] };
   }
 
   async getEpubFile(bookId: string): Promise<ArrayBuffer> {
