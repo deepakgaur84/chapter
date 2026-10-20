@@ -6,6 +6,7 @@ caller can import them with listening disabled instead.
 """
 
 import io
+import os
 import re
 import uuid
 import zipfile
@@ -33,9 +34,13 @@ FALLBACK_PAGES_PER_SECTION = 15
 MIN_CHARS_PER_PAGE = 30         # below this average the PDF is treated as scanned
 MIN_TEXT_PAGE_SHARE = 0.25      # share of pages that must carry text
 COVER_WIDTH_PX = 600
+OCR_LANG = os.environ.get("OCR_LANG", "eng")          # Tesseract language(s), e.g. "eng+fra"
+OCR_DPI = int(os.environ.get("OCR_DPI", "200"))       # resolution pages are rendered at for OCR
+OCR_MIN_LETTER_SHARE = 0.75     # recognised text must be mostly letters...
+OCR_WORD_LENGTH_RANGE = (3.0, 30.0)  # ...in words of a believable length, or it is treated as noise
 
 LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl"}
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f  ]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f￾￿]")
 _PAGE_NUMBER = re.compile(
     r"^\s*[-–— ]*(page\s+)?(\d{1,5}|[ivxlcdm]{1,8})([-–— ]*|\s+of\s+\d+\s*)$",
     re.IGNORECASE,
@@ -68,6 +73,8 @@ class ConversionResult:
     cover_jpeg: bytes
     epub: bytes
     chapters: int
+    aspect: float = 0.0      # height / width of the first page
+    reason: str = ""         # why there is no text: "no_text" or "unreadable"
 
 
 # --- text helpers -----------------------------------------------------------------------------
@@ -111,14 +118,28 @@ class RawBlock:
     margin: bool
 
 
-def _extract_blocks(doc):
+def _page_dict(page, ocr):
+    if ocr:
+        textpage = page.get_textpage_ocr(language=OCR_LANG, dpi=OCR_DPI, full=True)
+        return page.get_text("dict", textpage=textpage)
+    return page.get_text("dict")
+
+
+def _extract_blocks(doc, ocr=False, progress=None):
     blocks = []
+    failed_pages = 0
     for pno in range(doc.page_count):
-        page = doc[pno]
+        page = doc[pno]  # keep a reference: OCR text pages point back at their page
         height = page.rect.height or 1.0
         try:
-            data = page.get_text("dict")
+            data = _page_dict(page, ocr)
+        except RuntimeError as exc:
+            if ocr and "OCR" in str(exc):
+                raise ConversionError(f"OCR is not available in this container: {exc}") from exc
+            failed_pages += 1
+            continue
         except Exception:
+            failed_pages += 1
             continue
         for b in data.get("blocks", []):
             if b.get("type") != 0:
@@ -131,7 +152,9 @@ def _extract_blocks(doc):
                     continue
                 lines.append(txt)
                 for s in spans:
-                    sizes[round(s.get("size", 0.0), 1)] += len(s.get("text", "").strip())
+                    # OCR font sizes are estimates from box heights: whole points are steadier
+                    size = round(s.get("size", 0.0), 0 if ocr else 1)
+                    sizes[size] += len(s.get("text", "").strip())
             text = join_lines(lines)
             if not text:
                 continue
@@ -139,7 +162,24 @@ def _extract_blocks(doc):
             y0, y1 = b["bbox"][1], b["bbox"][3]
             margin = y1 <= height * MARGIN_FRACTION or y0 >= height * (1 - MARGIN_FRACTION)
             blocks.append(RawBlock(pno, text, size, len(lines), margin))
+        if progress:
+            progress(pno + 1, doc.page_count)
+    if ocr and failed_pages == doc.page_count:
+        raise ConversionError("OCR failed on every page")
     return blocks
+
+
+def _ocr_text_looks_real(blocks):
+    """Reject OCR output that is mostly noise (very rough scans, wrong language, pure images)."""
+    text = " ".join(b.text for b in blocks)
+    visible = [c for c in text if not c.isspace()]
+    if len(visible) < 50:
+        return False
+    if sum(c.isalpha() for c in visible) / len(visible) < OCR_MIN_LETTER_SHARE:
+        return False
+    words = text.split()
+    avg = sum(len(w) for w in words) / max(len(words), 1)
+    return OCR_WORD_LENGTH_RANGE[0] <= avg <= OCR_WORD_LENGTH_RANGE[1]
 
 
 def _drop_running_text(blocks, page_count):
@@ -415,35 +455,98 @@ def _title_from(doc, filename):
     return title, clean_text(meta.get("author") or "")
 
 
+def _first_page_aspect(doc):
+    try:
+        rect = doc[0].rect
+        return round(rect.height / rect.width, 4) if rect.width else 0.0
+    except Exception:
+        return 0.0
+
+
+def _convert_doc(doc, filename, ocr=False, progress=None, with_cover=True):
+    if doc.needs_pass:
+        raise ConversionError("This PDF is password protected")
+    if doc.page_count == 0:
+        raise ConversionError("This PDF has no pages")
+
+    title, author = _title_from(doc, filename)
+    cover = render_cover(doc) if with_cover else b""
+    aspect = _first_page_aspect(doc)
+
+    blocks = _drop_running_text(_extract_blocks(doc, ocr=ocr, progress=progress), doc.page_count)
+    chars = sum(len(b.text) for b in blocks)
+    text_pages = len({b.page for b in blocks if len(b.text) >= MIN_CHARS_PER_PAGE})
+    has_text = (
+        chars / doc.page_count >= MIN_CHARS_PER_PAGE
+        and text_pages / doc.page_count >= MIN_TEXT_PAGE_SHARE
+    )
+    if has_text and ocr and not _ocr_text_looks_real(blocks):
+        return ConversionResult(
+            False, doc.page_count, chars, title, author, "en", cover, b"", 0,
+            aspect=aspect, reason="unreadable",
+        )
+    if not has_text:
+        return ConversionResult(
+            False, doc.page_count, chars, title, author, "en", cover, b"", 0,
+            aspect=aspect, reason="no_text",
+        )
+
+    items = _merge_paragraphs(_to_items(blocks, _body_size(blocks)))
+    chapters = [c for c in build_chapters(doc, items) if c.items or c.title]
+    epub = build_epub(title, author, "en", chapters, cover)
+    return ConversionResult(
+        True, doc.page_count, chars, title, author, "en", cover, epub, len(chapters), aspect=aspect
+    )
+
+
 def convert_pdf(data, filename=""):
+    """Convert PDF bytes. Scanned PDFs are reported, not OCR'd (see convert_pdf_path)."""
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception as exc:
         raise ConversionError(f"Could not open the PDF: {exc}") from exc
     try:
-        if doc.needs_pass:
-            raise ConversionError("This PDF is password protected")
-        if doc.page_count == 0:
-            raise ConversionError("This PDF has no pages")
+        return _convert_doc(doc, filename)
+    finally:
+        doc.close()
 
-        title, author = _title_from(doc, filename)
-        cover = render_cover(doc)
 
-        blocks = _drop_running_text(_extract_blocks(doc), doc.page_count)
-        chars = sum(len(b.text) for b in blocks)
-        text_pages = len({b.page for b in blocks if len(b.text) >= MIN_CHARS_PER_PAGE})
-        has_text = (
-            chars / doc.page_count >= MIN_CHARS_PER_PAGE
-            and text_pages / doc.page_count >= MIN_TEXT_PAGE_SHARE
-        )
-        if not has_text:
-            return ConversionResult(False, doc.page_count, chars, title, author, "en", cover, b"", 0)
+def convert_pdf_path(path, filename="", ocr=False, progress=None):
+    """Convert a PDF file on disk. With ocr=True every page is recognised with Tesseract."""
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:
+        raise ConversionError(f"Could not open the PDF: {exc}") from exc
+    try:
+        return _convert_doc(doc, filename, ocr=ocr, progress=progress, with_cover=not ocr)
+    finally:
+        doc.close()
 
-        items = _merge_paragraphs(_to_items(blocks, _body_size(blocks)))
-        chapters = [c for c in build_chapters(doc, items) if c.items or c.title]
-        epub = build_epub(title, author, "en", chapters, cover)
-        return ConversionResult(
-            True, doc.page_count, chars, title, author, "en", cover, epub, len(chapters)
-        )
+
+def pdf_info(path):
+    """Page count and page shape, for the page viewer."""
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:
+        raise ConversionError(f"Could not open the PDF: {exc}") from exc
+    try:
+        return {"pages": doc.page_count, "aspect": _first_page_aspect(doc)}
+    finally:
+        doc.close()
+
+
+def render_page(path, number, width):
+    """JPEG of one page (1-based), scaled to the given width in pixels."""
+    try:
+        doc = fitz.open(path)
+    except Exception as exc:
+        raise ConversionError(f"Could not open the PDF: {exc}") from exc
+    try:
+        if number < 1 or number > doc.page_count:
+            raise ConversionError("Page out of range")
+        page = doc[number - 1]
+        zoom = width / (page.rect.width or width)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=80)
     finally:
         doc.close()

@@ -245,22 +245,22 @@ export default function LibraryPage() {
       setDragCounter(0);
 
       const files = Array.from(e.dataTransfer.files);
-      const epubFiles = files.filter((file) => file.name.toLowerCase().endsWith('.epub'));
+      const bookFiles = files.filter((file) => /\.(epub|pdf)$/i.test(file.name));
 
-      if (epubFiles.length === 0) {
+      if (bookFiles.length === 0) {
         if (files.length > 0) {
-          alert('Please drop EPUB files only');
+          alert('Please drop EPUB or PDF files only');
         }
         return;
       }
 
-      const nonEpubCount = files.length - epubFiles.length;
-      if (nonEpubCount > 0) {
-        alert(`${nonEpubCount} non-EPUB file(s) were skipped`);
+      const skippedCount = files.length - bookFiles.length;
+      if (skippedCount > 0) {
+        alert(`${skippedCount} file(s) that are not EPUB or PDF were skipped`);
       }
 
       try {
-        await uploadBooks(epubFiles);
+        await uploadBooks(bookFiles);
       } catch (error) {
         console.error('Upload failed:', error);
       }
@@ -323,7 +323,7 @@ export default function LibraryPage() {
       {isDragging && (
         <div className="fixed inset-0 z-50 bg-black/40 pointer-events-none">
           <div className="absolute inset-4 border-2 border-white/30 rounded-xl flex items-center justify-center">
-            <p className="text-white/90 text-lg font-medium">Drop EPUB files</p>
+            <p className="text-white/90 text-lg font-medium">Drop EPUB or PDF files</p>
           </div>
         </div>
       )}
@@ -480,7 +480,7 @@ export default function LibraryPage() {
                   </>
                 ) : (
                   <>
-                    <p className="text-white/70 text-sm mb-3">Drop EPUBs here to get started</p>
+                    <p className="text-white/70 text-sm mb-3">Drop EPUB or PDF files here to get started</p>
                     <UploadButton variant="shelf" size="sm" />
                   </>
                 )}

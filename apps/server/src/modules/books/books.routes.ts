@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { booksService } from './books.service';
+import { ocrService } from './ocr.service';
 import { libraryService } from '../library/library.service';
 
 export const booksRoutes: FastifyPluginAsync = async (app) => {
@@ -44,6 +45,12 @@ export const booksRoutes: FastifyPluginAsync = async (app) => {
 
   app.addHook('onRequest', async (request, reply) => {
     if (request.url.includes('/cover-proxy')) {
+      return;
+    }
+
+    // The EPUB / PDF file routes check the token themselves (header or ?token=), because they
+    // are opened directly by the browser. Everything else needs the Authorization header.
+    if (/\/[^/?]+\/(pdf|epub|pages\/\d+)\?(.*&)?token=/.test(request.url)) {
       return;
     }
 
@@ -161,43 +168,97 @@ export const booksRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get(
-    '/:bookId/epub',
-    {
-      preValidation: async (request, reply) => {
+  // These two routes are opened directly by the browser (download, PDF viewer), which cannot
+  // send an Authorization header, so they also accept the token as ?token=
+  const authWithOptionalQueryToken = async (request: any, reply: any) => {
+    try {
+      await request.jwtVerify();
+      return;
+    } catch {
+      const { token } = request.query as { token?: string };
+      if (token) {
         try {
-          await request.jwtVerify();
+          const decoded = app.jwt.verify(token);
+          request.user = decoded;
           return;
-        } catch {
-          const { token } = request.query as { token?: string };
-          if (token) {
-            try {
-              const decoded = app.jwt.verify(token);
-              (request as any).user = decoded;
-              return;
-            } catch {}
-          }
-          reply.code(401).send({ error: 'Unauthorized' });
-        }
-      },
-    },
+        } catch {}
+      }
+      reply.code(401).send({ error: 'Unauthorized' });
+    }
+  };
+
+  app.get('/:bookId/epub', { preValidation: authWithOptionalQueryToken }, async (request, reply) => {
+    try {
+      const userId = (request.user as any).userId;
+      const { bookId } = request.params as any;
+
+      const { buffer, filename } = await booksService.getEpubFile(userId, bookId);
+
+      return reply
+        .type('application/epub+zip')
+        .header('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`)
+        .send(buffer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to fetch EPUB';
+      return reply.code(404).send({ error: message });
+    }
+  });
+
+  app.get('/:bookId/pdf', { preValidation: authWithOptionalQueryToken }, async (request, reply) => {
+    try {
+      const userId = (request.user as any).userId;
+      const { bookId } = request.params as any;
+
+      const { buffer, filename } = await booksService.getPdfFile(userId, bookId);
+
+      return reply
+        .type('application/pdf')
+        .header('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(filename)}`)
+        .send(buffer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to fetch PDF';
+      return reply.code(404).send({ error: message });
+    }
+  });
+
+  // One page of a PDF as an image (page viewer for scanned books). Used as <img src>, so it
+  // accepts the token in the URL as well.
+  app.get(
+    '/:bookId/pages/:page',
+    { preValidation: authWithOptionalQueryToken },
     async (request, reply) => {
       try {
         const userId = (request.user as any).userId;
-        const { bookId } = request.params as any;
+        const { bookId, page } = request.params as any;
+        const { w } = request.query as { w?: string };
+        const width = Math.max(300, Math.min(parseInt(w || '1000', 10) || 1000, 2400));
 
-        const { buffer, filename } = await booksService.getEpubFile(userId, bookId);
+        const image = await booksService.getPageImage(userId, bookId, parseInt(page, 10), width);
 
         return reply
-          .type('application/epub+zip')
-          .header('Content-Disposition', `inline; filename="${encodeURIComponent(filename)}"`)
-          .send(buffer);
+          .type('image/jpeg')
+          .header('Cache-Control', 'private, max-age=86400')
+          .send(image);
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to fetch EPUB';
+        const message = error instanceof Error ? error.message : 'Failed to render page';
         return reply.code(404).send({ error: message });
       }
     }
   );
+
+  // Start (or restart) text recognition for a scanned PDF
+  app.post('/:bookId/ocr', async (request, reply) => {
+    try {
+      const userId = (request.user as any).userId;
+      const { bookId } = request.params as any;
+
+      await ocrService.retry(userId, bookId);
+      return reply.code(202).send({ ocrStatus: 'pending' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start text recognition';
+      return reply.code(400).send({ error: message });
+    }
+  });
 
   app.delete('/:bookId', async (request, reply) => {
     try {

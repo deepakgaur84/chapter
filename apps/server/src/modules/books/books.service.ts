@@ -1,13 +1,19 @@
 import { prisma } from '../../core/database';
 import { epubProcessor } from './epub.processor';
+import { pdfProcessor, isPdf } from './pdf.processor';
+import { pdfConverterService } from './pdf-converter.service';
+import { ocrService } from './ocr.service';
 import { readFile, deleteFile, saveFile } from '../../core/storage';
 import { openLibraryService } from './open-library.service';
 import type { AlternativeCover } from '@chapter/types';
 import path from 'path';
 
 export class BooksService {
-  async uploadBook(userId: string, epubBuffer: Buffer, filename: string): Promise<any> {
-    const bookId = await epubProcessor.processEPUB(userId, epubBuffer, filename);
+  async uploadBook(userId: string, fileBuffer: Buffer, filename: string): Promise<any> {
+    // PDFs are recognised by their content, not their name
+    const bookId = isPdf(fileBuffer)
+      ? await pdfProcessor.processPDF(userId, fileBuffer, filename)
+      : await epubProcessor.processEPUB(userId, fileBuffer, filename);
     return await this.getBookById(userId, bookId);
   }
 
@@ -31,6 +37,11 @@ export class BooksService {
             totalWords: true,
             totalCharacters: true,
             totalChapters: true,
+            sourceFormat: true,
+            hasText: true,
+            pageCount: true,
+            ocrStatus: true,
+            ocrProgress: true,
             createdAt: true,
             updatedAt: true,
             readingProgress: {
@@ -168,9 +179,19 @@ export class BooksService {
           }
         }
 
-        // This is Chapter's own stored copy of the book (data/books/<hash>.epub).
-        // The original file in a watched folder is never touched.
-        await deleteFile(book.filePath);
+        // These are Chapter's own stored copies (data/books/<hash>.epub, and for a PDF book the
+        // converted EPUB plus the stored original PDF; for a scanned book both are the same file).
+        // For a PDF book that is the converted EPUB plus the stored original PDF (for a scanned
+        // book both are the same file). The original in a watched folder is never touched here.
+        if (book.sourcePath) {
+          // Stop the converter if it is still recognising this scan, and let it forget the job
+          await ocrService.cancel(book.fileHash);
+        }
+        const storedFiles = new Set<string>([book.filePath]);
+        if (book.sourcePath) storedFiles.add(book.sourcePath);
+        for (const storedFile of storedFiles) {
+          await deleteFile(storedFile);
+        }
         if (book.coverPath) {
           await deleteFile(book.coverPath);
         }
@@ -195,6 +216,10 @@ export class BooksService {
   async getEpubFile(userId: string, bookId: string): Promise<{ buffer: Buffer; filename: string }> {
     const book = await this.getBookById(userId, bookId);
 
+    if (!book.hasText) {
+      throw new Error('This PDF has no readable text, so there is no EPUB version');
+    }
+
     if (!book.filePath) {
       throw new Error('EPUB file not found');
     }
@@ -203,6 +228,38 @@ export class BooksService {
     const filename = `${book.title || 'book'}.epub`;
 
     return { buffer, filename };
+  }
+
+  async getPdfFile(userId: string, bookId: string): Promise<{ buffer: Buffer; filename: string }> {
+    const book = await this.getBookById(userId, bookId);
+
+    if (!book.sourcePath) {
+      throw new Error('This book has no PDF file');
+    }
+
+    const buffer = await readFile(book.sourcePath);
+    const filename = `${book.title || 'book'}.pdf`;
+
+    return { buffer, filename };
+  }
+
+  /** One page of a PDF book as a JPEG, for the page viewer of scanned books */
+  async getPageImage(
+    userId: string,
+    bookId: string,
+    page: number,
+    width: number
+  ): Promise<Buffer> {
+    const book = await this.getBookById(userId, bookId);
+
+    if (!book.sourcePath) {
+      throw new Error('This book has no PDF');
+    }
+    if (!Number.isInteger(page) || page < 1 || (book.pageCount && page > book.pageCount)) {
+      throw new Error('Page not found');
+    }
+
+    return await pdfConverterService.renderPage(book.fileHash, page, width);
   }
 
   async getAlternativeCovers(userId: string, bookId: string): Promise<AlternativeCover[]> {
@@ -220,7 +277,8 @@ export class BooksService {
 
     const coverBuffer = await openLibraryService.downloadCover(coverUrl);
     const extension = coverUrl.includes('.png') ? 'png' : 'jpg';
-    const fileHash = path.basename(book.filePath, '.epub');
+    // fileHash, not the file name: a scanned PDF book is stored as <hash>.pdf
+    const fileHash = book.fileHash;
     const coverPath = path.join(path.dirname(book.filePath), `${fileHash}-cover.${extension}`);
 
     if (book.coverPath && book.coverPath !== coverPath) {

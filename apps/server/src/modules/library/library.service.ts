@@ -1,6 +1,7 @@
 import { prisma } from '../../core/database';
 import { folderScannerService } from './folder-scanner.service';
 import { epubProcessor } from '../books/epub.processor';
+import { pdfProcessor, isPdf } from '../books/pdf.processor';
 import { readFile } from '../../core/storage';
 import { config } from '../../core/config';
 import {
@@ -118,7 +119,7 @@ export class LibraryService {
   }
 
   /**
-   * Scan a specific folder for EPUBs
+   * Scan a specific folder for books (.epub and .pdf)
    */
   async scanFolder(userId: string, folderId: string): Promise<ScanResult> {
     const folder = await this.getWatchedFolder(userId, folderId);
@@ -140,21 +141,21 @@ export class LibraryService {
       // Scan folder
       const scanResult = await folderScannerService.scanFolder(folder.path);
 
-      // Import found EPUBs
+      // Import found books
       let imported = 0;
       let skipped = 0;
       const errors: string[] = [...scanResult.errors];
 
-      for (const epubPath of scanResult.epubFiles) {
+      for (const bookPath of scanResult.bookFiles) {
         try {
-          const wasImported = await this.importEpubFromPath(userId, epubPath);
+          const wasImported = await this.importBookFromPath(userId, bookPath);
           if (wasImported) {
             imported++;
           } else {
             skipped++;
           }
         } catch (error) {
-          errors.push(`Failed to import ${epubPath}: ${(error as Error).message}`);
+          errors.push(`Failed to import ${bookPath}: ${(error as Error).message}`);
         }
       }
 
@@ -165,7 +166,7 @@ export class LibraryService {
           lastScanAt: new Date(),
           lastScanStatus: errors.length > 0 ? 'error' : 'idle',
           lastScanError: errors.length > 0 ? errors.join('\n') : null,
-          booksFound: scanResult.epubFiles.length,
+          booksFound: scanResult.bookFiles.length,
           totalScans: { increment: 1 },
           booksImported: { increment: imported },
         },
@@ -174,7 +175,7 @@ export class LibraryService {
       return {
         folderId,
         status: errors.length > 0 ? 'error' : 'completed',
-        booksFound: scanResult.epubFiles.length,
+        booksFound: scanResult.bookFiles.length,
         booksImported: imported,
         booksSkipped: skipped,
         errors,
@@ -229,10 +230,10 @@ export class LibraryService {
   }
 
   /**
-   * Import an EPUB from a file path
+   * Import an EPUB or PDF from a file path
    * Returns true if imported, false if already exists (skipped)
    */
-  private async importEpubFromPath(userId: string, filePath: string): Promise<boolean> {
+  private async importBookFromPath(userId: string, filePath: string): Promise<boolean> {
     // Read the file
     const epubBuffer = await readFile(filePath);
 
@@ -273,13 +274,18 @@ export class LibraryService {
     }
 
     // New book, process it
-    const filename = filePath.split('/').pop() || 'unknown.epub';
-    await epubProcessor.processEPUB(userId, epubBuffer, filename);
+    const filename = filePath.split('/').pop() || 'unknown';
+    if (isPdf(epubBuffer)) {
+      // Converted to a readable EPUB (or stored as a PDF-only book when it is a scan)
+      await pdfProcessor.processPDF(userId, epubBuffer, filename);
+    } else {
+      await epubProcessor.processEPUB(userId, epubBuffer, filename);
+    }
     return true;
   }
 
   /**
-   * Find the original .epub file(s) of a book inside this user's watched folders.
+   * Find the original .epub or .pdf file(s) of a book inside this user's watched folders.
    * Nothing is deleted here. Throws if Chapter would not be allowed to delete a match, so the
    * caller can stop before removing anything.
    */
@@ -294,15 +300,15 @@ export class LibraryService {
     }
 
     const folders = await prisma.watchedFolder.findMany({ where: { userId } });
-    const epubPaths: string[] = [];
+    const bookPaths: string[] = [];
 
     for (const folder of folders) {
       const scan = await folderScannerService.scanFolder(folder.path);
-      epubPaths.push(...scan.epubFiles);
+      bookPaths.push(...scan.bookFiles);
     }
 
     const matches = await findFilesMatchingBook(
-      epubPaths,
+      bookPaths,
       userBook.book.fileHash,
       userBook.book.fileSize
     );

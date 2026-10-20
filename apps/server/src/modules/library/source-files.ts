@@ -20,20 +20,20 @@ export async function hashFile(filePath: string): Promise<string> {
 }
 
 /**
- * From a list of .epub paths, return the ones that are exactly this book.
+ * From a list of .epub / .pdf paths, return the ones that are exactly this book.
  * A file only counts when its size AND its SHA-256 match the stored book, so a different edition
  * of the same title is never touched. The size check keeps the number of files that have to be
  * read to a minimum.
  */
 export async function findFilesMatchingBook(
-  epubPaths: string[],
+  bookPaths: string[],
   fileHash: string,
   fileSize: number
 ): Promise<string[]> {
   const matches: string[] = [];
   const seen = new Set<string>();
 
-  for (const epubPath of epubPaths) {
+  for (const epubPath of bookPaths) {
     const resolved = path.resolve(epubPath);
     if (seen.has(resolved)) continue;
     seen.add(resolved);

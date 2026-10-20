@@ -1,19 +1,27 @@
 # pdf2epub
 
-Small service that turns a text PDF into a reflowable EPUB for Chapter, and tells Chapter when a
-PDF is a scan with no readable text.
+Sidecar service that lets Chapter read PDFs.
 
-- `POST /convert` (multipart: `file`, optional `filename`) returns JSON with `hasText`, `pages`,
-  `title`, `author`, a base64 `cover` (JPEG of page 1) and, when there is text, a base64 `epub`.
-- `GET /health`
+- Text PDFs are converted to a reflowable EPUB (`POST /convert`), so reading and listening work
+  as for any EPUB.
+- Scanned PDFs (no text) are reported as such. Chapter shows their pages as images
+  (`GET /pages/<hash>/<n>?w=<px>`) and the sidecar recognises the text in the background with
+  Tesseract OCR (`POST/GET/DELETE /ocr/<hash>`, `GET /ocr/<hash>/result`). When it works, the
+  book becomes a normal readable, listenable book. If not, the page viewer stays.
+- `GET /info/<hash>` gives page count and shape. `GET /health` returns `{"status","ocr"}`.
 
-What it does to the text: removes page numbers and running headers/footers, joins wrapped lines
-and repairs words split with a hyphen at a line end, joins paragraphs cut by a page or column
-break, and finds chapters from the PDF outline (bookmarks), else from large headings, else in
-groups of 15 pages.
+PDFs are read from the shared books folder (`BOOKS_DIR`, default `/data/books`), so mount the
+Chapter data volume into this container read-only (see the stack additions).
 
-A PDF counts as scanned when it averages under 30 characters of text per page, or fewer than 25%
-of its pages have any text.
+Settings (environment): `OCR_LANG` (default `eng`), `OCR_DPI` (default 200), `BOOKS_DIR`,
+`JOBS_DIR`. Other languages need the matching `tesseract-ocr-<lang>` package added in the
+Dockerfile, then `OCR_LANG=eng+<lang>`.
 
-Limits: tables, footnotes and unusual layouts come out rougher. There is no OCR. PyMuPDF is AGPL
-licensed, which is fine for a private install.
+Text cleanup: removes page numbers and running headers/footers, joins wrapped lines, repairs
+hyphenated words, joins paragraphs cut by page breaks, and finds chapters from the PDF outline,
+else large headings, else groups of 15 pages. A PDF counts as scanned when it averages under 30
+characters per page or fewer than 25% of its pages have text. OCR output that looks like noise
+is rejected.
+
+OCR runs one book at a time at low priority and is slow on a NAS (seconds per page); it competes
+with TTS for CPU. PyMuPDF is AGPL licensed, fine for a private install.

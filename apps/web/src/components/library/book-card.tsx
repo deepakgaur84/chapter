@@ -17,6 +17,7 @@ import {
   Edit,
   Star,
   Trash2,
+  FileText,
 } from 'lucide-react';
 
 // Global cover URL cache to persist across component mounts/unmounts
@@ -208,7 +209,7 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
   }, [showDeleteConfirm, closeDeleteConfirm]);
 
   // Remove the book from the library. By default only Chapter's own copy is deleted and the
-  // original .epub in any watched folder is left alone. With the checkbox ticked, the original
+  // original .epub or .pdf in any watched folder is left alone. With the checkbox ticked, the original
   // file(s) in the watched folders are deleted too, so a rescan cannot bring the book back.
   const handleConfirmDelete = async () => {
     if (isDeleting) return;
@@ -326,6 +327,16 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
                 <Star className="w-3 h-3 text-white fill-current" />
               </div>
             )}
+            {/* Scanned PDF: no readable text, so it cannot be read in the reader or listened to */}
+            {book.hasText === false && (
+              <div
+                className="h-6 px-1.5 rounded-full bg-black/70 flex items-center gap-1 text-[10px] font-medium text-white/90 shadow-md"
+                title="Scanned PDF: no readable text yet, so listening is not available"
+              >
+                <FileText className="w-3 h-3" />
+                {book.ocrStatus === 'pending' || book.ocrStatus === 'running' ? 'Scan · OCR' : 'Scan'}
+              </div>
+            )}
             {/* Downloaded badge - always visible when downloaded */}
             {isDownloaded && (
               <div className="w-6 h-6 rounded-full bg-emerald-500 flex items-center justify-center shadow-md">
@@ -402,8 +413,8 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
                 </Tooltip.Root>
               </Tooltip.Provider>
 
-              {/* Download - only show if not downloaded */}
-              {!isDownloaded && (
+              {/* Download - only show if not downloaded (a scanned PDF has no EPUB to download) */}
+              {!isDownloaded && book.hasText !== false && (
                 <>
                   <div className="w-5 h-px bg-white/10 mx-auto" />
                   <Tooltip.Provider>
@@ -494,8 +505,8 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
               <p className="mt-3 text-sm text-white/60 leading-relaxed">
                 This removes the book, your reading progress and its generated audio from Chapter.
                 {alsoDeleteFile
-                  ? ' The original .epub file in your watched folder will also be permanently deleted.'
-                  : ' The original .epub file in your folder is not touched. If the book is in a watched folder, it will be added again the next time that folder is scanned.'}
+                  ? ' The original book file (EPUB or PDF) in your watched folder will also be permanently deleted.'
+                  : ' The original file in your folder is not touched. If the book is in a watched folder, it will be added again the next time that folder is scanned.'}
               </p>
               <label className="mt-4 flex items-start gap-3 cursor-pointer select-none">
                 <input
@@ -508,7 +519,7 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
                 <span className="text-sm text-white/80 leading-snug">
                   Also delete the file from the folder
                   <span className="block text-xs text-white/50 mt-0.5">
-                    Permanently deletes the original .epub from your watched folders so a rescan
+                    Permanently deletes the original file from your watched folders so a rescan
                     cannot add it back. This cannot be undone. Only files that exactly match this
                     book are deleted.
                   </span>

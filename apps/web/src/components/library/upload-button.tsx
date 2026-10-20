@@ -25,7 +25,7 @@ export function UploadButton({ variant = 'default', size = 'sm' }: UploadButtonP
 
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
-      if (file.name.toLowerCase().endsWith('.epub')) {
+      if (/\.(epub|pdf)$/i.test(file.name)) {
         files.push(file);
       } else {
         invalidFiles.push(file.name);
@@ -34,7 +34,7 @@ export function UploadButton({ variant = 'default', size = 'sm' }: UploadButtonP
 
     if (invalidFiles.length > 0) {
       alert(
-        `The following files are not EPUB files and will be skipped:\n${invalidFiles.join('\n')}`
+        `The following files are not EPUB or PDF files and will be skipped:\n${invalidFiles.join('\n')}`
       );
     }
 
@@ -59,7 +59,7 @@ export function UploadButton({ variant = 'default', size = 'sm' }: UploadButtonP
       <input
         ref={fileInputRef}
         type="file"
-        accept=".epub"
+        accept=".epub,.pdf,application/epub+zip,application/pdf"
         multiple
         className="hidden"
         onChange={handleFileSelect}

@@ -27,7 +27,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(multipart, {
     limits: {
-      fileSize: 100 * 1024 * 1024, // 100MB max file size
+      fileSize: config.upload.maxFileSizeBytes, // MAX_UPLOAD_MB, default 500MB (scanned PDFs are big)
     },
   });
 

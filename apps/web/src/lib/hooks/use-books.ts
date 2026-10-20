@@ -95,7 +95,7 @@ export function useBooks() {
       // Create placeholder entries for all files - first few are uploading, rest are queued
       const newUploads = files.map((file, index) => ({
         id: `upload-${Date.now()}-${index}-${file.name}`,
-        filename: file.name.replace(/\.epub$/i, ''),
+        filename: file.name.replace(/\.(epub|pdf)$/i, ''),
         status: index < MAX_CONCURRENT_UPLOADS ? ('uploading' as const) : ('queued' as const),
         position: index < MAX_CONCURRENT_UPLOADS ? undefined : index - MAX_CONCURRENT_UPLOADS + 1,
       }));
@@ -221,6 +221,13 @@ export function useBook(bookId: string) {
       }
     },
     enabled: !!bookId,
+    // While a scanned PDF is being text-recognised, check on it so the page switches to the
+    // normal reader as soon as the text is ready
+    refetchInterval: (query) => {
+      const book = query.state.data as any;
+      const working = book?.ocrStatus === 'pending' || book?.ocrStatus === 'running';
+      return book && book.hasText === false && working ? 4000 : false;
+    },
     retry: (failureCount) => {
       if (!navigator.onLine) return false;
       return failureCount < 2;

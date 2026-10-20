@@ -4,11 +4,29 @@ import { parseEPUB } from '@chapter/epub-parser';
 import { tokenize, countWords } from '@chapter/utils';
 import { prisma } from '../../core/database';
 import { config } from '../../core/config';
-import { saveFile } from '../../core/storage';
+import { saveFile, deleteFile } from '../../core/storage';
+
+/** Set when the EPUB was converted from a PDF: the book is identified by the PDF, not the EPUB */
+export interface PdfSource {
+  fileHash: string;
+  fileSize: number;
+  pdfPath: string;
+}
+
+// ISBN-10 / ISBN-13, so the random identifier of a converted PDF is not stored as an ISBN
+const looksLikeIsbn = (value?: string): boolean =>
+  !!value && /^(97[89])?\d{9}[\dX]$/i.test(value.replace(/[-\s]/g, ''));
 
 export class EPUBProcessor {
-  async processEPUB(userId: string, epubBuffer: Buffer, filename: string): Promise<string> {
-    const fileHash = crypto.createHash('sha256').update(epubBuffer).digest('hex');
+  async processEPUB(
+    userId: string,
+    epubBuffer: Buffer,
+    filename: string,
+    source?: PdfSource
+  ): Promise<string> {
+    const fileHash = source
+      ? source.fileHash
+      : crypto.createHash('sha256').update(epubBuffer).digest('hex');
 
     let book = await prisma.book.findUnique({
       where: { fileHash },
@@ -43,14 +61,21 @@ export class EPUBProcessor {
       data: {
         title: normalizeField(structure.metadata.title) || 'Untitled',
         author: normalizeField(structure.metadata.author),
-        isbn: normalizeField(structure.metadata.isbn),
+        isbn: source
+          ? looksLikeIsbn(normalizeField(structure.metadata.isbn))
+            ? normalizeField(structure.metadata.isbn)
+            : undefined
+          : normalizeField(structure.metadata.isbn),
         language: normalizeField(structure.metadata.language),
         publisher: normalizeField(structure.metadata.publisher),
         description: normalizeField(structure.metadata.description),
         coverPath,
         filePath,
-        fileSize: epubBuffer.length,
+        fileSize: source ? source.fileSize : epubBuffer.length,
         fileHash,
+        sourceFormat: source ? 'pdf' : 'epub',
+        sourcePath: source ? source.pdfPath : null,
+        hasText: true,
         epubMetadata: epubMetadata as any,
         totalWords: structure.totalWords,
         totalCharacters: structure.totalCharacters,
@@ -58,15 +83,33 @@ export class EPUBProcessor {
       },
     });
 
+    await this.createChapters(book.id, structure.chapters);
+
+    await this.linkBookToUser(userId, book.id);
+
+    return book.id;
+  }
+
+  /** Save the chapters (and their paragraphs) of a parsed EPUB for a book */
+  private async createChapters(
+    bookId: string,
+    chapters: Array<{
+      index: number;
+      title?: string;
+      href: string;
+      htmlContent: string;
+      textContent: string;
+    }>
+  ): Promise<void> {
     let globalCharPosition = 0;
 
-    for (const chapterData of structure.chapters) {
+    for (const chapterData of chapters) {
       const startPosition = globalCharPosition;
       const endPosition = startPosition + chapterData.textContent.length;
 
       const chapter = await prisma.chapter.create({
         data: {
-          bookId: book.id,
+          bookId,
           index: chapterData.index,
           title: chapterData.title,
           href: chapterData.href,
@@ -83,10 +126,45 @@ export class EPUBProcessor {
 
       globalCharPosition = endPosition;
     }
+  }
 
-    await this.linkBookToUser(userId, book.id);
+  /**
+   * Give a book that was imported without text (a scanned PDF) its text, from an EPUB made by
+   * text recognition. The book becomes a normal readable, listenable book; its PDF is kept.
+   */
+  async attachChapters(bookId: string, epubBuffer: Buffer): Promise<void> {
+    const book = await prisma.book.findUnique({ where: { id: bookId } });
+    if (!book) throw new Error('Book not found');
 
-    return book.id;
+    const structure = await parseEPUB(epubBuffer);
+    if (structure.chapters.length === 0) {
+      throw new Error('The recognised text has no chapters');
+    }
+
+    const epubPath = path.join(config.storage.booksPath, `${book.fileHash}.epub`);
+    await saveFile(epubPath, epubBuffer);
+
+    try {
+      await this.createChapters(book.id, structure.chapters);
+      await prisma.book.update({
+        where: { id: book.id },
+        data: {
+          filePath: epubPath, // the book is now backed by an EPUB; the PDF stays as sourcePath
+          hasText: true,
+          totalWords: structure.totalWords,
+          totalCharacters: structure.totalCharacters,
+          totalChapters: structure.chapters.length,
+          ocrStatus: 'done',
+          ocrProgress: book.pageCount ?? 0,
+          ocrError: null,
+        },
+      });
+    } catch (error) {
+      // Leave the book as it was: a scan with no text
+      await prisma.chapter.deleteMany({ where: { bookId: book.id } });
+      await deleteFile(epubPath);
+      throw error;
+    }
   }
 
   private async processParagraphs(
@@ -122,7 +200,7 @@ export class EPUBProcessor {
     }
   }
 
-  private async linkBookToUser(userId: string, bookId: string): Promise<void> {
+  async linkBookToUser(userId: string, bookId: string): Promise<void> {
     const existing = await prisma.userBook.findUnique({
       where: {
         userId_bookId: {

@@ -54,6 +54,16 @@ model Book {
   // False for scanned PDFs: no readable text, so no reader text or listening, only the PDF itself
   hasText      Boolean @default(true)
 
+  // Page viewer for scanned PDFs
+  pageCount  Int?
+  pageAspect Float? // page height / width of the first page
+
+  // Background text recognition (OCR) of scanned PDFs:
+  // null (never tried) | pending | running | done | failed
+  ocrStatus   String?
+  ocrProgress Int     @default(0) // pages recognised so far
+  ocrError    String?
+
   // EPUB metadata
   epubMetadata Json? // Raw EPUB metadata
 

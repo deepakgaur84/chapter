@@ -1,7 +1,9 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useParams, useRouter } from 'next/navigation';
+import { apiClient } from '@/lib/api-client';
 import { useAuth } from '@/lib/hooks/use-auth';
 import { useBook, useBookStructure, useChapter } from '@/lib/hooks/use-books';
 import { useChunkPipeline } from '@/lib/hooks/use-chunk-pipeline';
@@ -13,6 +15,7 @@ import { AudioPlayer } from '@/components/reader/AudioPlayer';
 import { ReaderMode } from '@/components/reader/ModeToggle';
 import { ReadAlongView } from '@/components/reader/ReadAlongView';
 import { UnifiedControls } from '@/components/reader/unified-controls';
+import { ScannedPdfView } from '@/components/reader/scanned-pdf-view';
 import { readingToAudioPosition, audioToReadingPosition } from '@/lib/position-sync';
 import { chunkKey, resolveChunkIndex } from '@/lib/chunk-pipeline';
 import {
@@ -21,6 +24,10 @@ import {
   getPrevVisible,
   getNextVisible,
 } from '@/lib/visible-chapters';
+
+// Saved with the place in a scanned book's page viewer, so that if the book later becomes readable
+// text (OCR), the place can be carried over (page position -> chapter and position in chapter)
+const SCANNED_MARKER = 'scanned-pdf';
 
 export default function ReaderPage() {
   const params = useParams();
@@ -160,6 +167,76 @@ export default function ReaderPage() {
     }
   }, [mode, pipeline.planError, pipeline.isPlanReady, pipeline.chunks.length]);
 
+  // --- scanned PDFs: page viewer first, readable text once OCR has finished -------------------
+  const queryClient = useQueryClient();
+  const scanPercentRef = useRef(0);
+  const wasScannedRef = useRef(false);
+  const mappedRef = useRef(false);
+  const [mappedScroll, setMappedScroll] = useState<number | null>(null);
+
+  const handleScanPosition = useCallback(
+    (percentage: number) => {
+      scanPercentRef.current = percentage;
+      updateProgress({
+        chapterIndex: 0,
+        scrollPosition: percentage,
+        percentage,
+        audioChunkId: SCANNED_MARKER,
+        mode: 'reading',
+      });
+    },
+    [updateProgress]
+  );
+
+  const handleStartOcr = useCallback(async () => {
+    await apiClient.startOcr(bookId);
+    await queryClient.invalidateQueries({ queryKey: ['book', bookId] });
+  }, [bookId, queryClient]);
+
+  // The book was a scan a moment ago and now has text: load its chapters
+  useEffect(() => {
+    if (book?.hasText === false) {
+      wasScannedRef.current = true;
+    } else if (book?.hasText && wasScannedRef.current) {
+      wasScannedRef.current = false;
+      queryClient.invalidateQueries({ queryKey: ['book-structure', bookId] });
+      queryClient.invalidateQueries({ queryKey: ['chapter', bookId] });
+    }
+  }, [book?.hasText, bookId, queryClient]);
+
+  // Carry the place reached in the page viewer over to the new text: the same share of the way
+  // through the book, found by character position
+  const hadScanPlace = progress?.audioChunkId === SCANNED_MARKER || scanPercentRef.current > 0;
+  useEffect(() => {
+    if (mappedRef.current || !book?.hasText || !hadScanPlace || !progress) return;
+    const chapters: any[] = structure?.chapters || [];
+    if (chapters.length === 0) return;
+
+    mappedRef.current = true;
+    const percent = scanPercentRef.current > 0 ? scanPercentRef.current : progress.scrollPosition || 0;
+    const total = chapters[chapters.length - 1].endPosition || 0;
+    const target = (percent / 100) * total;
+    const withText = chapters.filter((c) => (c.charCount ?? 1) > 0);
+    const hit =
+      withText.find((c) => target >= c.startPosition && target < c.endPosition) ||
+      withText[withText.length - 1] ||
+      chapters[0];
+    const span = hit.endPosition - hit.startPosition;
+    const within = span > 0 ? Math.min(100, Math.max(0, ((target - hit.startPosition) / span) * 100)) : 0;
+
+    setCurrentChapter(hit.index);
+    setCurrentScrollProgress(within);
+    setMappedScroll(within);
+    updateProgress({
+      chapterIndex: hit.index,
+      chapterId: hit.id,
+      scrollPosition: within,
+      percentage: percent,
+      audioChunkId: '',
+      mode: 'reading',
+    });
+  }, [book?.hasText, hadScanPlace, progress, structure, updateProgress]);
+
   if (authLoading || bookLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -170,6 +247,26 @@ export default function ReaderPage() {
 
   if (!isAuthenticated || !book) {
     return null;
+  }
+
+  // A scanned PDF has no text (yet): show its pages, with reading mode and listening unavailable
+  if (book.hasText === false) {
+    return (
+      <ScannedPdfView
+        book={book}
+        isOnline={isOnline}
+        onBack={() => router.push('/library')}
+        restorePosition={
+          isProgressRestored
+            ? progress?.audioChunkId === SCANNED_MARKER
+              ? progress.scrollPosition || 0
+              : 0
+            : undefined
+        }
+        onPositionChange={handleScanPosition}
+        onStartOcr={handleStartOcr}
+      />
+    );
   }
 
   const goToPrevChapter = () => {
@@ -290,7 +387,13 @@ export default function ReaderPage() {
           chapter={chapter}
           isLoading={chapterLoading}
           onScrollProgress={handleScrollProgress}
-          initialScrollPosition={isProgressRestored ? progress?.scrollPosition : undefined}
+          initialScrollPosition={
+            !isProgressRestored
+              ? undefined
+              : hadScanPlace && mappedScroll === null
+                ? undefined // wait until the place in the page viewer has been turned into a chapter
+                : (mappedScroll ?? progress?.scrollPosition)
+          }
         />
       </div>
 

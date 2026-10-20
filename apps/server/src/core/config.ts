@@ -31,6 +31,20 @@ export const config = {
     defaultVoice: process.env.TTS_DEFAULT_VOICE || 'af_bella',
   },
 
+  upload: {
+    maxFileSizeBytes: parseInt(process.env.MAX_UPLOAD_MB || '500', 10) * 1024 * 1024,
+  },
+
+  pdf: {
+    converterUrl: process.env.PDF_CONVERTER_URL || 'http://pdf2epub:5000',
+    // Converting a big PDF can take a while on a NAS
+    converterTimeoutMs: parseInt(process.env.PDF_CONVERTER_TIMEOUT || '600000', 10),
+    // Scanned PDFs are text-recognised (OCR) in the background. Set OCR_ENABLED=false to turn off.
+    ocrEnabled: (process.env.OCR_ENABLED || 'true').toLowerCase() !== 'false',
+    // How often the server asks the converter how far OCR has got
+    ocrPollMs: parseInt(process.env.OCR_POLL_MS || '5000', 10),
+  },
+
   library: {
     maxWatchedFolders: parseInt(process.env.MAX_WATCHED_FOLDERS || '20', 10),
     scanTimeout: parseInt(process.env.SCAN_TIMEOUT || '300000', 10),

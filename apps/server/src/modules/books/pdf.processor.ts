@@ -5,6 +5,7 @@ import { config } from '../../core/config';
 import { saveFile, deleteFile } from '../../core/storage';
 import { epubProcessor } from './epub.processor';
 import { pdfConverterService } from './pdf-converter.service';
+import { ocrService } from './ocr.service';
 
 export function isPdf(buffer: Buffer): boolean {
   return buffer.length > 5 && buffer.subarray(0, 5).toString('latin1') === '%PDF-';
@@ -16,8 +17,9 @@ export class PDFProcessor {
    *
    * - PDF with text: converted to an EPUB, which is what gets read and listened to. The original
    *   PDF is kept next to it.
-   * - Scanned PDF (no text layer): stored as a PDF-only book. It can be opened as a PDF, but has
-   *   no text, so listening is disabled.
+   * - Scanned PDF (no text layer): stored as a PDF-only book that opens in the page viewer, with
+   *   listening disabled. Text recognition (OCR) then runs in the background; if it works, the
+   *   book becomes a normal readable and listenable one (see OcrService).
    *
    * The book is identified by the hash and size of the PDF itself, so importing the same PDF
    * again is recognised, and the original can be found again in a watched folder.
@@ -78,6 +80,9 @@ export class PDFProcessor {
         sourcePath: pdfPath,
         hasText: false,
         epubMetadata: { scanned: true, pages: converted.pages } as any,
+        pageCount: converted.pages,
+        pageAspect: converted.aspect,
+        ocrStatus: config.pdf.ocrEnabled ? 'pending' : null,
         totalWords: 0,
         totalCharacters: 0,
         totalChapters: 0,
@@ -85,6 +90,7 @@ export class PDFProcessor {
     });
 
     await epubProcessor.linkBookToUser(userId, book.id);
+    ocrService.enqueue(book.id);
     return book.id;
   }
 }

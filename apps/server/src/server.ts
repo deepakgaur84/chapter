@@ -3,6 +3,7 @@ import { config } from './core/config';
 import { connectDatabase, disconnectDatabase } from './core/database';
 import { disconnectRedis } from './core/redis';
 import { ensureStorageDirectories } from './core/storage';
+import { ocrService } from './modules/books/ocr.service';
 
 async function start() {
   try {
@@ -27,6 +28,11 @@ async function start() {
 
     console.log(`🚀 Server running on port ${config.port}`);
     console.log(`📚 Environment: ${config.nodeEnv}`);
+
+    // Pick up scanned PDFs whose text recognition was interrupted by a restart
+    ocrService.resumePending().catch((error) => {
+      console.error('Could not resume text recognition:', error);
+    });
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

@@ -3,7 +3,7 @@ import path from 'path';
 import { config } from '../../core/config';
 
 export interface ScanResult {
-  epubFiles: string[];
+  bookFiles: string[];
   errors: string[];
   duration: number;
 }
@@ -24,11 +24,11 @@ export class FolderScannerService {
   ];
 
   /**
-   * Scan a folder for EPUB files recursively
+   * Scan a folder for book files (.epub and .pdf) recursively
    */
   async scanFolder(folderPath: string): Promise<ScanResult> {
     const startTime = Date.now();
-    const epubFiles: string[] = [];
+    const bookFiles: string[] = [];
     const errors: string[] = [];
 
     try {
@@ -46,21 +46,21 @@ export class FolderScannerService {
       }
 
       // Walk directory tree
-      await this.walkDirectory(folderPath, epubFiles, errors, 0);
+      await this.walkDirectory(folderPath, bookFiles, errors, 0);
     } catch (error) {
       errors.push((error as Error).message);
     }
 
     const duration = Date.now() - startTime;
-    return { epubFiles, errors, duration };
+    return { bookFiles, errors, duration };
   }
 
   /**
-   * Recursively walk directory and collect EPUB files
+   * Recursively walk directory and collect book files
    */
   private async walkDirectory(
     dir: string,
-    epubFiles: string[],
+    bookFiles: string[],
     errors: string[],
     depth: number
   ): Promise<void> {
@@ -83,9 +83,9 @@ export class FolderScannerService {
             }
 
             // Recurse into subdirectory
-            await this.walkDirectory(fullPath, epubFiles, errors, depth + 1);
-          } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.epub')) {
-            epubFiles.push(fullPath);
+            await this.walkDirectory(fullPath, bookFiles, errors, depth + 1);
+          } else if (entry.isFile() && /\.(epub|pdf)$/i.test(entry.name)) {
+            bookFiles.push(fullPath);
           }
         } catch (error) {
           // Log individual file/directory errors but continue scanning

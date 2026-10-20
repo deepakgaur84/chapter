@@ -178,6 +178,23 @@ class APIClient {
     return response.arrayBuffer();
   }
 
+  /** URL of one page image (page viewer for scanned PDFs). Includes the login token. */
+  getPageUrl(bookId: string, page: number, width: number): string {
+    const token = this.token ? `&token=${encodeURIComponent(this.token)}` : '';
+    return `/api/books/${bookId}/pages/${page}?w=${width}${token}`;
+  }
+
+  /** Start (or restart) text recognition (OCR) of a scanned PDF */
+  async startOcr(bookId: string): Promise<void> {
+    await this.request(`/books/${bookId}/ocr`, { method: 'POST' });
+  }
+
+  /** URL of the stored PDF. Includes the login token. */
+  getPdfUrl(bookId: string): string {
+    const params = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
+    return `/api/books/${bookId}/pdf${params}`;
+  }
+
   getEpubUrl(bookId: string): string {
     const params = this.token ? `?token=${encodeURIComponent(this.token)}` : '';
     return `/api/books/${bookId}/epub${params}`;
