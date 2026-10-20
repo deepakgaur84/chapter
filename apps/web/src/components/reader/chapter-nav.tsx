@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { X } from 'lucide-react';
+import { getVisibleChapterIndexes } from '@/lib/visible-chapters';
 
 interface ChapterNavProps {
   chapters: any[];
@@ -18,6 +19,14 @@ export function ChapterNav({
   onClose,
 }: ChapterNavProps) {
   const [isVisible, setIsVisible] = useState(false);
+
+  // Chapters with no words (cover pages, image-only pages) are left out of the list.
+  // `chapterIndex` is the real index, which is what the reader uses; the number shown beside
+  // each entry counts only the visible chapters.
+  const entries = getVisibleChapterIndexes(chapters).map((chapterIndex) => ({
+    chapter: chapters[chapterIndex],
+    chapterIndex,
+  }));
 
   useEffect(() => {
     // Trigger animation
@@ -66,44 +75,44 @@ export function ChapterNav({
         {/* Chapter list */}
         <div className="flex-1 overflow-y-auto scrollbar-thin">
           <div className="divide-y divide-border/30">
-            {chapters.map((chapter, index) => (
+            {entries.map(({ chapter, chapterIndex }, position) => (
               <button
-                key={index}
-                onClick={() => handleSelectChapter(index)}
+                key={chapterIndex}
+                onClick={() => handleSelectChapter(chapterIndex)}
                 className={`w-full text-left px-6 py-5 transition-all duration-200 hover:bg-accent/50 ${
-                  index === currentChapter
+                  chapterIndex === currentChapter
                     ? 'bg-[hsl(var(--reader-accent))]/10 border-l-2 border-[hsl(var(--reader-accent))]'
                     : ''
                 }`}
                 style={{
-                  animationDelay: `${Math.min(index * 30, 300)}ms`,
+                  animationDelay: `${Math.min(position * 30, 300)}ms`,
                 }}
               >
                 <div className="flex items-start gap-4">
                   <span
                     className={`text-xs font-mono font-medium mt-0.5 transition-colors ${
-                      index === currentChapter
+                      chapterIndex === currentChapter
                         ? 'text-[hsl(var(--reader-accent))]'
                         : 'text-muted-foreground'
                     }`}
                   >
-                    {String(index + 1).padStart(2, '0')}
+                    {String(position + 1).padStart(2, '0')}
                   </span>
                   <div className="flex-1 min-w-0">
                     <p
                       className={`text-sm font-serif transition-colors ${
-                        index === currentChapter
+                        chapterIndex === currentChapter
                           ? 'font-semibold text-[hsl(var(--reader-text))]'
                           : 'text-[hsl(var(--reader-text))]/80'
                       }`}
                     >
-                      {chapter.title || `Chapter ${index + 1}`}
+                      {chapter.title || `Chapter ${position + 1}`}
                     </p>
-                    {chapter.wordCount && (
+                    {chapter.wordCount > 0 ? (
                       <p className="text-xs text-muted-foreground mt-1.5 font-medium tracking-wide">
                         {chapter.wordCount.toLocaleString()} words
                       </p>
-                    )}
+                    ) : null}
                   </div>
                 </div>
               </button>
