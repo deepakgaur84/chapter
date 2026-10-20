@@ -46,7 +46,13 @@ model Book {
   // File information
   filePath    String   @unique
   fileSize    Int
-  fileHash    String   @unique // SHA256 for deduplication
+  fileHash    String   @unique // SHA256 of the file that was imported (the PDF for PDF books)
+
+  // Source format: "epub", or "pdf" (PDFs are converted to an EPUB on import)
+  sourceFormat String  @default("epub")
+  sourcePath   String? // Stored copy of the original PDF
+  // False for scanned PDFs: no readable text, so no reader text or listening, only the PDF itself
+  hasText      Boolean @default(true)
 
   // EPUB metadata
   epubMetadata Json? // Raw EPUB metadata
