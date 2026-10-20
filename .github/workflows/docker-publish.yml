@@ -1,30 +1,51 @@
 name: Build and Publish Docker Images
 
-# Manual only: run it from the Actions tab with the "Run workflow" button.
+# Builds run automatically when you commit to master (linux/amd64 only).
+# To build for another CPU type, use Actions -> this workflow -> Run workflow and pick a platform.
 on:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   workflow_dispatch:
     inputs:
       platforms:
-        description: 'What to build (amd64 = your Intel NAS)'
-        required: true
+        description: 'Platforms to build'
         type: choice
-        default: 'linux/amd64'
+        default: linux/amd64
         options:
-          - 'linux/amd64'
-          - 'linux/arm64'
-          - 'linux/amd64,linux/arm64'
+          - linux/amd64
+          - linux/arm64
+          - linux/amd64,linux/arm64
+
+# A newer commit cancels the build still running (or waiting) for the older one
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   REGISTRY: ghcr.io
-
-# If you start a second run, the older one is cancelled so they never race.
-concurrency:
-  group: build-and-publish
-  cancel-in-progress: true
+  # Manual runs use the platform picked in the form; commits always build amd64
+  PLATFORMS: ${{ github.event.inputs.platforms || 'linux/amd64' }}
 
 jobs:
-  build-and-push:
+  # When you commit several files one after another in the GitHub web editor, every commit starts
+  # a run. This job waits two minutes; if another commit arrives meanwhile, this run is cancelled
+  # by the concurrency rule above, so only the last commit of a burst is built.
+  wait-for-more-commits:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wait briefly in case more commits follow
+        if: github.event_name == 'push'
+        run: sleep 120
+
+  build-and-push:
+    needs: wait-for-more-commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -49,7 +70,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Only needed to build arm64 images on this (amd64) runner
       - name: Set up QEMU
+        if: contains(env.PLATFORMS, 'arm64')
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -62,27 +85,30 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # amd64 (or both): tagged latest plus the branch name and commit.
+      # arm64 only: tagged "arm64" and nothing else, so it can never replace the amd64 images.
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
-          # amd64 builds (alone or with arm64) publish :latest and a commit tag.
-          # arm64-only builds publish :arm64 so they never replace :latest.
           tags: |
-            type=raw,value=latest,enable=${{ contains(inputs.platforms || 'linux/amd64', 'amd64') }}
-            type=sha,prefix=,enable=${{ contains(inputs.platforms || 'linux/amd64', 'amd64') }}
-            type=raw,value=arm64,enable=${{ !contains(inputs.platforms || 'linux/amd64', 'amd64') }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' && env.PLATFORMS != 'linux/arm64' }}
+            type=ref,event=branch,enable=${{ env.PLATFORMS != 'linux/arm64' }}
+            type=sha,prefix=,enable=${{ env.PLATFORMS != 'linux/arm64' }}
+            type=semver,pattern={{version}},enable=${{ env.PLATFORMS != 'linux/arm64' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ env.PLATFORMS != 'linux/arm64' }}
+            type=raw,value=arm64,enable=${{ env.PLATFORMS == 'linux/arm64' }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: ${{ inputs.platforms || 'linux/amd64' }}
+          platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: ${{ matrix.build-args }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
