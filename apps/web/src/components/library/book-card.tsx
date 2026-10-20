@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, memo, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { Menu } from '@base-ui/react/menu';
 import { Tooltip } from '@base-ui/react/tooltip';
@@ -15,6 +16,7 @@ import {
   BookOpen,
   Edit,
   Star,
+  Trash2,
 } from 'lucide-react';
 
 // Global cover URL cache to persist across component mounts/unmounts
@@ -93,7 +95,7 @@ function getTextureOffset(bookId: string): { x: number; y: number } {
 export const BookCard = memo(function BookCard({ book }: BookCardProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { toggleFavorite } = useBooks();
+  const { toggleFavorite, deleteBook } = useBooks();
   // Initialize from cache to prevent flash on remount
   const [coverUrl, setCoverUrl] = useState<string | null>(() => getCachedCover(book.id));
   const textureOffset = useMemo(() => getTextureOffset(book.id), [book.id]);
@@ -101,6 +103,10 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
   const [showCoverPicker, setShowCoverPicker] = useState(false);
   const [showMetadataEditor, setShowMetadataEditor] = useState(false);
   const [isTogglingFavorite, setIsTogglingFavorite] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [alsoDeleteFile, setAlsoDeleteFile] = useState(false);
   const { downloadBook, isDownloading, progress } = useDownload();
 
   const loadCover = useCallback(
@@ -182,6 +188,57 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
     } finally {
       setIsTogglingFavorite(false);
     }
+  };
+
+  const closeDeleteConfirm = useCallback(() => {
+    if (isDeleting) return;
+    setShowDeleteConfirm(false);
+    setDeleteError(null);
+    setAlsoDeleteFile(false);
+  }, [isDeleting]);
+
+  // Close the delete confirmation with Escape
+  useEffect(() => {
+    if (!showDeleteConfirm) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeDeleteConfirm();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [showDeleteConfirm, closeDeleteConfirm]);
+
+  // Remove the book from the library. By default only Chapter's own copy is deleted and the
+  // original .epub in any watched folder is left alone. With the checkbox ticked, the original
+  // file(s) in the watched folders are deleted too, so a rescan cannot bring the book back.
+  const handleConfirmDelete = async () => {
+    if (isDeleting) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await deleteBook(book.id, alsoDeleteFile);
+      if (result && result.failed.length > 0) {
+        // The book is already gone from the library; tell the user the file is still there
+        window.alert(
+          `The book was removed from the library, but ${result.failed.length} file(s) could not ` +
+            `be deleted from the folder, so it may be added again on the next scan:\n\n` +
+            result.failed.map((f) => `${f.path}: ${f.error}`).join('\n')
+        );
+      }
+    } catch (error) {
+      console.error('Failed to delete book:', error);
+      setDeleteError(error instanceof Error ? error.message : 'Could not delete the book');
+      setIsDeleting(false);
+      return;
+    }
+
+    // The book is gone from the server: also drop the offline copy and cached cover on this device
+    try {
+      await offlineStorage.deleteBook(book.id);
+    } catch (error) {
+      console.error('Failed to remove offline copy:', error);
+    }
+    clearCachedCover(book.id);
+    // The card disappears when the books list refreshes, so there is nothing more to reset
   };
 
   const handleSaveMetadata = useCallback(
@@ -373,6 +430,31 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
                   </Tooltip.Provider>
                 </>
               )}
+              {/* Divider */}
+              <div className="w-5 h-px bg-white/10 mx-auto" />
+
+              {/* Delete from library */}
+              <Tooltip.Provider>
+                <Tooltip.Root>
+                  <Tooltip.Trigger
+                    className="flex items-center justify-center w-10 h-10 text-white/60 hover:text-red-400 transition-colors duration-150"
+                    aria-label="Delete from library"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowDeleteConfirm(true);
+                    }}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Tooltip.Trigger>
+                  <Tooltip.Portal>
+                    <Tooltip.Positioner side="left" sideOffset={8}>
+                      <Tooltip.Popup className="rounded-lg bg-black/90 px-3 py-1.5 text-xs text-white shadow-xl backdrop-blur-sm">
+                        Delete from library
+                      </Tooltip.Popup>
+                    </Tooltip.Positioner>
+                  </Tooltip.Portal>
+                </Tooltip.Root>
+              </Tooltip.Provider>
             </div>
           </div>
 
@@ -387,6 +469,79 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
           )}
         </div>
       </div>
+
+      {/* Delete confirmation */}
+      {showDeleteConfirm &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={(e) => {
+              e.stopPropagation();
+              closeDeleteConfirm();
+            }}
+          >
+            <div
+              role="alertdialog"
+              aria-modal="true"
+              aria-labelledby={`delete-title-${book.id}`}
+              className="w-full max-w-md rounded-2xl bg-stone-900 border border-white/10 shadow-2xl p-6 text-white"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 id={`delete-title-${book.id}`} className="text-lg font-semibold">
+                Delete from library?
+              </h2>
+              <p className="mt-2 text-sm text-white/80 font-medium line-clamp-2">{book.title}</p>
+              <p className="mt-3 text-sm text-white/60 leading-relaxed">
+                This removes the book, your reading progress and its generated audio from Chapter.
+                {alsoDeleteFile
+                  ? ' The original .epub file in your watched folder will also be permanently deleted.'
+                  : ' The original .epub file in your folder is not touched. If the book is in a watched folder, it will be added again the next time that folder is scanned.'}
+              </p>
+              <label className="mt-4 flex items-start gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={alsoDeleteFile}
+                  onChange={(e) => setAlsoDeleteFile(e.target.checked)}
+                  disabled={isDeleting}
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-red-600"
+                />
+                <span className="text-sm text-white/80 leading-snug">
+                  Also delete the file from the folder
+                  <span className="block text-xs text-white/50 mt-0.5">
+                    Permanently deletes the original .epub from your watched folders so a rescan
+                    cannot add it back. This cannot be undone. Only files that exactly match this
+                    book are deleted.
+                  </span>
+                </span>
+              </label>
+              {deleteError && (
+                <p className="mt-3 text-sm text-red-400" role="alert">
+                  {deleteError}
+                </p>
+              )}
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={closeDeleteConfirm}
+                  disabled={isDeleting}
+                  className="px-4 py-2 rounded-lg text-sm bg-white/10 hover:bg-white/15 disabled:opacity-50 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDelete}
+                  disabled={isDeleting}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-500 disabled:opacity-60 transition-colors"
+                >
+                  {isDeleting && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {isDeleting ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
 
       {/* Cover Picker Dialog */}
       <CoverPickerDialog
