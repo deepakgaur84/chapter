@@ -1,340 +1,285 @@
+import crypto from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
 import { prisma } from '../../core/database';
-import { folderScannerService } from './folder-scanner.service';
-import { epubProcessor } from '../books/epub.processor';
-import { pdfProcessor, isPdf } from '../books/pdf.processor';
-import { readFile } from '../../core/storage';
 import { config } from '../../core/config';
-import {
-  findFilesMatchingBook,
-  assertFilesDeletable,
-  removeFiles,
-  type RemoveFilesResult,
-} from './source-files';
-import type { WatchedFolder, ScanResult } from '@chapter/types';
+import { epubProcessor, type ImportResult } from '../books/epub.processor';
+import { pdfProcessor, isPdf } from '../books/pdf.processor';
 
+export interface IngestMeta {
+  /** "library" = found in the books folder, "upload" = added through the web page */
+  origin: 'library' | 'upload';
+  path?: string;
+  mtimeMs?: number;
+}
+
+export interface IngestResult extends ImportResult {
+  /** The file belongs to a book that was removed on purpose, so it was not added back */
+  removed?: boolean;
+}
+
+export interface ScanStatus {
+  state: 'idle' | 'scanning';
+  libraryPath: string;
+  /** Book files found in the books folder in the current (or last) scan */
+  total: number;
+  /** Files looked at so far */
+  done: number;
+  imported: number;
+  /** Files added to a book that was already there (its PDF or EPUB) */
+  merged: number;
+  /** Files that were already known, or are copies */
+  skipped: number;
+  failed: number;
+  current: string | null;
+  errors: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+const BOOK_FILE = /\.(epub|pdf)$/i;
+
+/**
+ * The books folder is read-only source material. This service reads it (never writes to it) and
+ * adds what it finds to the library, keeping one book per title no matter how many files (PDF,
+ * EPUB) it has. A list of known files (BookFile) makes a repeat scan quick and keeps books you
+ * removed from coming back.
+ */
 export class LibraryService {
-  /**
-   * Create a new watched folder
-   */
-  async createWatchedFolder(userId: string, path: string, name?: string): Promise<WatchedFolder> {
-    // Check folder limit
-    const existingCount = await prisma.watchedFolder.count({
-      where: { userId },
-    });
+  private scanning: Promise<void> | null = null;
+  private status: ScanStatus = this.freshStatus();
 
-    if (existingCount >= config.library.maxWatchedFolders) {
-      throw new Error(`Maximum of ${config.library.maxWatchedFolders} watched folders allowed`);
-    }
+  private freshStatus(): ScanStatus {
+    return {
+      state: 'idle',
+      libraryPath: config.library.path,
+      total: 0,
+      done: 0,
+      imported: 0,
+      merged: 0,
+      skipped: 0,
+      failed: 0,
+      current: null,
+      errors: [],
+      startedAt: null,
+      finishedAt: null,
+    };
+  }
 
-    // Validate path
-    const pathTest = await folderScannerService.testPath(path);
-    if (!pathTest.accessible) {
-      throw new Error(`Path not accessible: ${pathTest.error}`);
-    }
-
-    // Check for duplicate
-    const existing = await prisma.watchedFolder.findUnique({
-      where: {
-        userId_path: {
-          userId,
-          path,
-        },
-      },
-    });
-
-    if (existing) {
-      throw new Error('This folder is already being watched');
-    }
-
-    // Create watched folder
-    const folder = await prisma.watchedFolder.create({
-      data: {
-        userId,
-        path,
-        name,
-      },
-    });
-
-    return folder as WatchedFolder;
+  getStatus(): ScanStatus {
+    return { ...this.status, errors: [...this.status.errors] };
   }
 
   /**
-   * Get all watched folders for a user
+   * Add one file to the library for these people: the one place every import (upload or books
+   * folder) goes through. Files already known are not read again.
    */
-  async getWatchedFolders(userId: string): Promise<WatchedFolder[]> {
-    const folders = await prisma.watchedFolder.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-    return folders as WatchedFolder[];
-  }
+  async ingest(
+    userIds: string[],
+    buffer: Buffer,
+    filename: string,
+    meta: IngestMeta
+  ): Promise<IngestResult> {
+    if (userIds.length === 0) throw new Error('No user to add the book for');
 
-  /**
-   * Get a specific watched folder
-   */
-  async getWatchedFolder(userId: string, folderId: string): Promise<WatchedFolder> {
-    const folder = await prisma.watchedFolder.findFirst({
-      where: {
-        id: folderId,
-        userId,
-      },
-    });
+    const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+    const format = isPdf(buffer) ? 'pdf' : 'epub';
+    const known = await prisma.bookFile.findUnique({ where: { hash } });
 
-    if (!folder) {
-      throw new Error('Watched folder not found');
-    }
-
-    return folder as WatchedFolder;
-  }
-
-  /**
-   * Update a watched folder
-   */
-  async updateWatchedFolder(
-    userId: string,
-    folderId: string,
-    updates: { name?: string; isActive?: boolean }
-  ): Promise<WatchedFolder> {
-    // Verify ownership
-    await this.getWatchedFolder(userId, folderId);
-
-    const folder = await prisma.watchedFolder.update({
-      where: { id: folderId },
-      data: updates,
-    });
-
-    return folder as WatchedFolder;
-  }
-
-  /**
-   * Delete a watched folder
-   */
-  async deleteWatchedFolder(userId: string, folderId: string): Promise<void> {
-    // Verify ownership
-    await this.getWatchedFolder(userId, folderId);
-
-    await prisma.watchedFolder.delete({
-      where: { id: folderId },
-    });
-  }
-
-  /**
-   * Scan a specific folder for books (.epub and .pdf)
-   */
-  async scanFolder(userId: string, folderId: string): Promise<ScanResult> {
-    const folder = await this.getWatchedFolder(userId, folderId);
-
-    if (!folder.isActive) {
-      throw new Error('Cannot scan inactive folder');
-    }
-
-    // Update status to scanning
-    await prisma.watchedFolder.update({
-      where: { id: folderId },
-      data: {
-        lastScanStatus: 'scanning',
-        lastScanError: null,
-      },
-    });
-
-    try {
-      // Scan folder
-      const scanResult = await folderScannerService.scanFolder(folder.path);
-
-      // Import found books
-      let imported = 0;
-      let skipped = 0;
-      const errors: string[] = [...scanResult.errors];
-
-      for (const bookPath of scanResult.bookFiles) {
-        try {
-          const wasImported = await this.importBookFromPath(userId, bookPath);
-          if (wasImported) {
-            imported++;
-          } else {
-            skipped++;
-          }
-        } catch (error) {
-          errors.push(`Failed to import ${bookPath}: ${(error as Error).message}`);
-        }
-      }
-
-      // Update folder with results
-      await prisma.watchedFolder.update({
-        where: { id: folderId },
-        data: {
-          lastScanAt: new Date(),
-          lastScanStatus: errors.length > 0 ? 'error' : 'idle',
-          lastScanError: errors.length > 0 ? errors.join('\n') : null,
-          booksFound: scanResult.bookFiles.length,
-          totalScans: { increment: 1 },
-          booksImported: { increment: imported },
-        },
-      });
-
-      return {
-        folderId,
-        status: errors.length > 0 ? 'error' : 'completed',
-        booksFound: scanResult.bookFiles.length,
-        booksImported: imported,
-        booksSkipped: skipped,
-        errors,
-        duration: scanResult.duration,
-      };
-    } catch (error) {
-      // Update status to error
-      await prisma.watchedFolder.update({
-        where: { id: folderId },
-        data: {
-          lastScanStatus: 'error',
-          lastScanError: (error as Error).message,
-          totalScans: { increment: 1 },
-        },
-      });
-
-      throw error;
-    }
-  }
-
-  /**
-   * Scan all active folders for a user
-   */
-  async scanAllFolders(userId: string): Promise<ScanResult[]> {
-    const folders = await prisma.watchedFolder.findMany({
-      where: {
-        userId,
-        isActive: true,
-      },
-    });
-
-    const results: ScanResult[] = [];
-
-    for (const folder of folders) {
-      try {
-        const result = await this.scanFolder(userId, folder.id);
-        results.push(result);
-      } catch (error) {
-        results.push({
-          folderId: folder.id,
-          status: 'error',
-          booksFound: 0,
-          booksImported: 0,
-          booksSkipped: 0,
-          errors: [(error as Error).message],
-          duration: 0,
+    if (known) {
+      if (meta.path) {
+        await prisma.bookFile.update({
+          where: { hash },
+          data: { path: meta.path, mtimeMs: meta.mtimeMs ?? null, size: buffer.length },
         });
       }
-    }
-
-    return results;
-  }
-
-  /**
-   * Import an EPUB or PDF from a file path
-   * Returns true if imported, false if already exists (skipped)
-   */
-  private async importBookFromPath(userId: string, filePath: string): Promise<boolean> {
-    // Read the file
-    const epubBuffer = await readFile(filePath);
-
-    // Calculate hash to check if already exists
-    const crypto = await import('crypto');
-    const fileHash = crypto.createHash('sha256').update(epubBuffer).digest('hex');
-
-    // Check if book already exists
-    const existingBook = await prisma.book.findUnique({
-      where: { fileHash },
-    });
-
-    if (existingBook) {
-      // Book exists, check if user already has it
-      const existingUserBook = await prisma.userBook.findUnique({
-        where: {
-          userId_bookId: {
-            userId,
-            bookId: existingBook.id,
-          },
-        },
-      });
-
-      if (existingUserBook) {
-        // User already has this book, skip
-        return false;
+      if (known.ignored && meta.origin === 'library') {
+        return { bookId: known.bookId ?? '', created: false, removed: true };
       }
-
-      // Link existing book to user
-      await prisma.userBook.create({
-        data: {
-          userId,
-          bookId: existingBook.id,
-          tags: [],
-        },
-      });
-      return true;
+      if (known.ignored) {
+        // Adding it by hand again: that is a clear wish to have it back
+        await prisma.bookFile.update({ where: { hash }, data: { ignored: false } });
+      }
+      if (known.bookId) {
+        for (const userId of userIds) await epubProcessor.linkBookToUser(userId, known.bookId);
+        return { bookId: known.bookId, created: false };
+      }
+      // Known, but its book is gone: import it again below
     }
 
-    // New book, process it
-    const filename = filePath.split('/').pop() || 'unknown';
-    // A PDF is converted to a readable EPUB (or stored as a PDF-only book when it is a scan).
-    // A file that is another copy (format or edition) of a book already in the library is skipped.
-    const result = isPdf(epubBuffer)
-      ? await pdfProcessor.importPDF(userId, epubBuffer, filename)
-      : await epubProcessor.importEPUB(userId, epubBuffer, filename);
-    return result.created;
-  }
+    const result: ImportResult =
+      format === 'pdf'
+        ? await pdfProcessor.importPDF(userIds[0], buffer, filename)
+        : await epubProcessor.importEPUB(userIds[0], buffer, filename);
 
-  /**
-   * Find the original .epub or .pdf file(s) of a book inside this user's watched folders.
-   * Nothing is deleted here. Throws if Chapter would not be allowed to delete a match, so the
-   * caller can stop before removing anything.
-   */
-  async findSourceFilesForBook(userId: string, bookId: string): Promise<string[]> {
-    const userBook = await prisma.userBook.findUnique({
-      where: { userId_bookId: { userId, bookId } },
-      include: { book: { select: { fileHash: true, fileSize: true } } },
+    await prisma.bookFile.upsert({
+      where: { hash },
+      create: {
+        hash,
+        bookId: result.bookId,
+        size: buffer.length,
+        format,
+        origin: meta.origin,
+        path: meta.path ?? null,
+        mtimeMs: meta.mtimeMs ?? null,
+      },
+      update: {
+        bookId: result.bookId,
+        size: buffer.length,
+        format,
+        origin: meta.origin,
+        path: meta.path ?? null,
+        mtimeMs: meta.mtimeMs ?? null,
+        ignored: false,
+      },
     });
 
-    if (!userBook) {
-      throw new Error('Book not found');
+    for (const userId of userIds.slice(1)) {
+      await epubProcessor.linkBookToUser(userId, result.bookId);
     }
-
-    const folders = await prisma.watchedFolder.findMany({ where: { userId } });
-    const bookPaths: string[] = [];
-
-    for (const folder of folders) {
-      const scan = await folderScannerService.scanFolder(folder.path);
-      bookPaths.push(...scan.bookFiles);
-    }
-
-    const matches = await findFilesMatchingBook(
-      bookPaths,
-      userBook.book.fileHash,
-      userBook.book.fileSize
-    );
-    await assertFilesDeletable(matches);
-    return matches;
+    return result;
   }
 
-  /**
-   * Delete files found by findSourceFilesForBook
-   */
-  async removeSourceFiles(filePaths: string[]): Promise<RemoveFilesResult> {
-    return removeFiles(filePaths);
-  }
-
-  /**
-   * Get scan status for a folder
-   */
-  async getFolderScanStatus(userId: string, folderId: string) {
-    const folder = await this.getWatchedFolder(userId, folderId);
-
-    return {
-      folderId: folder.id,
-      status: folder.lastScanStatus as 'idle' | 'scanning' | 'error',
-      booksFound: folder.booksFound,
-      lastScanAt: folder.lastScanAt,
-      lastScanError: folder.lastScanError,
+  /** Every book file in the books folder, EPUBs first (their text is better than a conversion) */
+  async walk(root: string): Promise<string[]> {
+    const files: string[] = [];
+    const visit = async (dir: string, depth: number) => {
+      if (depth > config.library.maxScanDepth) return;
+      let entries;
+      try {
+        entries = await fs.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue; // hidden files, macOS "._" copies, .Trash
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) await visit(full, depth + 1);
+        else if (entry.isFile() && BOOK_FILE.test(entry.name)) files.push(full);
+      }
     };
+    await visit(root, 0);
+    const rank = (file: string) => (file.toLowerCase().endsWith('.epub') ? 0 : 1);
+    return files.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  }
+
+  /** Start scanning the books folder in the background. Does nothing if a scan is running. */
+  startScan(): Promise<void> {
+    if (this.scanning) return this.scanning;
+    this.scanning = this.scan()
+      .catch((error) => {
+        console.error('Library scan failed:', error);
+        this.status.errors.push((error as Error).message);
+      })
+      .finally(() => {
+        this.status.state = 'idle';
+        this.status.current = null;
+        this.status.finishedAt = new Date().toISOString();
+        this.scanning = null;
+      });
+    return this.scanning;
+  }
+
+  private async scan(): Promise<void> {
+    this.status = { ...this.freshStatus(), state: 'scanning', startedAt: new Date().toISOString() };
+
+    const users = (await prisma.user.findMany({ select: { id: true } })).map((u) => u.id);
+    if (users.length === 0) {
+      console.log('📚 No users yet, the books folder will be scanned after the first sign-up');
+      return;
+    }
+
+    const root = config.library.path;
+    const rootOk = await fs.stat(root).then((s) => s.isDirectory(), () => false);
+    if (!rootOk) {
+      console.log(`📚 Books folder ${root} not found, nothing to scan`);
+      return;
+    }
+
+    const files = await this.walk(root);
+    this.status.total = files.length;
+    console.log(`📚 Scanning ${files.length} book file(s) in ${root}`);
+
+    for (const file of files) {
+      this.status.current = path.basename(file);
+      try {
+        const stat = await fs.stat(file);
+        const known = await prisma.bookFile.findFirst({ where: { path: file } });
+        if (known && known.size === stat.size && known.mtimeMs === stat.mtimeMs && (known.bookId || known.ignored)) {
+          this.status.skipped++;
+        } else {
+          const buffer = await fs.readFile(file);
+          const result = await this.ingest(users, buffer, path.basename(file), {
+            origin: 'library',
+            path: file,
+            mtimeMs: stat.mtimeMs,
+          });
+          if (result.removed) this.status.skipped++;
+          else if (result.created) this.status.imported++;
+          else if (result.merged) this.status.merged++;
+          else this.status.skipped++;
+        }
+      } catch (error) {
+        this.status.failed++;
+        const message = `${path.basename(file)}: ${(error as Error).message}`;
+        if (this.status.errors.length < 20) this.status.errors.push(message);
+        console.error('Library import failed:', message);
+      }
+      this.status.done++;
+    }
+
+    // People may have signed up while the scan ran
+    await this.linkLibraryBooks((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
+    console.log(
+      `📚 Library scan done: ${this.status.imported} added, ${this.status.merged} merged, ` +
+        `${this.status.skipped} unchanged, ${this.status.failed} failed`
+    );
+  }
+
+  /** Make sure these people have every book that came from the books folder */
+  async linkLibraryBooks(userIds: string[]): Promise<void> {
+    const files = await prisma.bookFile.findMany({
+      where: { origin: 'library', ignored: false, bookId: { not: null } },
+      select: { bookId: true },
+    });
+    const bookIds = Array.from(new Set(files.map((f) => f.bookId as string)));
+    for (const userId of userIds) {
+      for (const bookId of bookIds) {
+        await epubProcessor.linkBookToUser(userId, bookId);
+      }
+    }
+  }
+
+  /** A new person signs up: give them the books of the books folder too */
+  async onUserCreated(userId: string): Promise<void> {
+    await this.linkLibraryBooks([userId]);
+    // The first sign-up on a new install has nobody to add the books for until now. A scan that is
+    // already running links its results to everyone when it finishes; otherwise start one.
+    this.startScan();
+  }
+
+  /** Files of removed books, which a scan skips */
+  async listHidden(): Promise<Array<{ id: string; name: string; format: string; size: number }>> {
+    const rows = await prisma.bookFile.findMany({
+      where: { ignored: true, origin: 'library' },
+      orderBy: { updatedAt: 'desc' },
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.path ? path.basename(row.path) : row.hash.slice(0, 12),
+      format: row.format,
+      size: row.size,
+    }));
+  }
+
+  /** Bring removed books back: they are added again by a scan right away */
+  async restoreHidden(ids?: string[]): Promise<number> {
+    const result = await prisma.bookFile.updateMany({
+      where: { ignored: true, origin: 'library', ...(ids ? { id: { in: ids } } : {}) },
+      data: { ignored: false },
+    });
+    if (result.count > 0) this.startScan();
+    return result.count;
   }
 }
 

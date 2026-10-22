@@ -169,6 +169,8 @@ export function UnifiedControls({
                 onModeChange={onModeChange}
                 disableListening={disableListening}
                 disableListeningReason={disableListeningReason}
+                hasPdf={!!book?.hasPdf}
+                disablePdf={disableListening}
               />
 
               <button

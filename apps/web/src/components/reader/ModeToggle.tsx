@@ -1,9 +1,9 @@
 'use client';
 
 import { Tabs } from '@base-ui/react/tabs';
-import { Book, Headphones, WifiOff } from 'lucide-react';
+import { Book, FileText, Headphones, WifiOff } from 'lucide-react';
 
-export type ReaderMode = 'reading' | 'listening';
+export type ReaderMode = 'pdf' | 'reading' | 'listening';
 
 interface ModeToggleProps {
   mode: ReaderMode;
@@ -11,6 +11,10 @@ interface ModeToggleProps {
   className?: string;
   disableListening?: boolean;
   disableListeningReason?: string;
+  /** The book has a PDF: show the PDF option as well */
+  hasPdf?: boolean;
+  /** The PDF pages need a connection */
+  disablePdf?: boolean;
 }
 
 export function ModeToggle({
@@ -19,15 +23,33 @@ export function ModeToggle({
   className = '',
   disableListening = false,
   disableListeningReason,
+  hasPdf = false,
+  disablePdf = false,
 }: ModeToggleProps) {
   const handleValueChange = (value: string | null) => {
     if (value === 'listening' && disableListening) return;
+    if (value === 'pdf' && disablePdf) return;
     if (value) onModeChange(value as ReaderMode);
   };
 
   return (
     <Tabs.Root value={mode} onValueChange={handleValueChange} className={className}>
       <Tabs.List className="relative inline-flex items-center gap-0.5 sm:gap-1 p-1 sm:p-1.5 bg-[hsl(var(--reader-text))]/5 backdrop-blur-sm rounded-xl sm:rounded-2xl border border-[hsl(var(--reader-text))]/8">
+        {hasPdf && (
+          <Tabs.Tab
+            value="pdf"
+            disabled={disablePdf}
+            className={`relative z-10 flex items-center justify-center gap-2 w-8 sm:w-[88px] py-1.5 sm:py-2 rounded-lg sm:rounded-xl font-semibold text-[13px] transition-all duration-300 outline-none ${
+              disablePdf
+                ? 'text-[hsl(var(--reader-text))]/20 cursor-not-allowed'
+                : 'text-[hsl(var(--reader-text))]/40 data-[selected]:text-[hsl(var(--reader-text))] hover:text-[hsl(var(--reader-text))]/60'
+            }`}
+          >
+            <FileText className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" />
+            <span className="tracking-wide hidden sm:inline">PDF</span>
+          </Tabs.Tab>
+        )}
+
         <Tabs.Tab
           value="reading"
           className="relative z-10 flex items-center justify-center gap-2 w-8 sm:w-[88px] py-1.5 sm:py-2 rounded-lg sm:rounded-xl font-semibold text-[13px] transition-all duration-300 outline-none text-[hsl(var(--reader-text))]/40 data-[selected]:text-[hsl(var(--reader-text))] hover:text-[hsl(var(--reader-text))]/60"

@@ -383,7 +383,11 @@ export function AudioPlayer({
                 </Menu.Portal>
               </Menu.Root>
 
-              <ModeToggle mode={mode || 'listening'} onModeChange={onModeChange || (() => {})} />
+              <ModeToggle
+                mode={mode || 'listening'}
+                onModeChange={onModeChange || (() => {})}
+                hasPdf={!!book?.hasPdf}
+              />
 
               <button
                 onClick={onToggleNav}

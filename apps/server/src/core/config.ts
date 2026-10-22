@@ -21,8 +21,31 @@ export const config = {
   },
 
   storage: {
+    // WORK_PATH is the one folder Chapter writes to (mounted read-write). Inside it:
+    //   epubs/   the EPUB of every book (converted from a PDF, or copied from the library)
+    //   pdfs/    a working copy of each PDF (the page viewer and text recognition read these)
+    //   covers/  cover images
+    //   audio/   generated and prepared audio
+    //   uploads/ reserved for files added through the web page
+    // The books folder (LIBRARY_PATH) is only ever read.
+    // Without WORK_PATH the older single-folder layout is used, so existing installs keep working.
+    workPath: process.env.WORK_PATH || '',
+    // Where earlier versions kept everything. Files found here are moved into the work folder.
+    legacyBooksPath: process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
+    legacyAudioPath: process.env.AUDIO_CACHE_PATH || path.join(process.cwd(), 'storage', 'audio'),
     booksPath: process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
-    audioPath: process.env.AUDIO_CACHE_PATH || path.join(process.cwd(), 'storage', 'audio'),
+    epubsPath: process.env.WORK_PATH
+      ? path.join(process.env.WORK_PATH, 'epubs')
+      : process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
+    pdfsPath: process.env.WORK_PATH
+      ? path.join(process.env.WORK_PATH, 'pdfs')
+      : process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
+    coversPath: process.env.WORK_PATH
+      ? path.join(process.env.WORK_PATH, 'covers')
+      : process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
+    audioPath: process.env.WORK_PATH
+      ? path.join(process.env.WORK_PATH, 'audio')
+      : process.env.AUDIO_CACHE_PATH || path.join(process.cwd(), 'storage', 'audio'),
     audioCacheMaxSize: parseInt(process.env.AUDIO_CACHE_MAX_SIZE || '10737418240', 10),
   },
 
@@ -51,14 +74,10 @@ export const config = {
   },
 
   library: {
-    maxWatchedFolders: parseInt(process.env.MAX_WATCHED_FOLDERS || '20', 10),
-    scanTimeout: parseInt(process.env.SCAN_TIMEOUT || '300000', 10),
+    // The folder with your books (.epub and .pdf), mounted read-only. It is scanned in the
+    // background when the server starts; nothing in it is ever changed.
+    path: process.env.LIBRARY_PATH || '/library',
+    scanOnStartup: (process.env.LIBRARY_SCAN_ON_STARTUP || 'true').toLowerCase() !== 'false',
     maxScanDepth: parseInt(process.env.MAX_SCAN_DEPTH || '10', 10),
-    defaultLibraryPath:
-      process.env.DEFAULT_LIBRARY_PATH ||
-      path.join(
-        process.env.BOOK_STORAGE_PATH || path.join(process.cwd(), 'storage', 'books'),
-        'library'
-      ),
   },
 };

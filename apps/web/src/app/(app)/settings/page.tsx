@@ -8,7 +8,7 @@ import { useAuth } from '@/lib/hooks/use-auth';
 import { useTTS } from '@/lib/hooks/use-tts';
 import { useSettingsStore, type Theme, type FontSize } from '@/lib/stores/settings-store';
 import { apiClient } from '@/lib/api-client';
-import { LibraryFolders } from '@/components/library/library-folders';
+import { LibrarySettings } from '@/components/settings/library-settings';
 import { AudioPrepSettings } from '@/components/settings/audio-prep-settings';
 import { DuplicateBooks } from '@/components/settings/duplicate-books';
 import {
@@ -231,7 +231,8 @@ export default function SettingsPage() {
 
           {/* Library Section */}
           <section className="mb-8">
-            <LibraryFolders />
+            <h2 className="text-lg font-semibold mb-4 text-white/90">Library</h2>
+            <LibrarySettings />
           </section>
 
           {/* TTS Section */}

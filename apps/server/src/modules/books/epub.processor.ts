@@ -6,6 +6,7 @@ import { prisma } from '../../core/database';
 import { config } from '../../core/config';
 import { saveFile, deleteFile } from '../../core/storage';
 import { compareBooks } from './duplicates';
+import { ocrService } from './ocr.service';
 
 /** Set when the EPUB was converted from a PDF: the book is identified by the PDF, not the EPUB */
 export interface PdfSource {
@@ -24,6 +25,8 @@ export interface ImportResult {
   created: boolean;
   /** Set when the file looks like a different copy (another format or edition) of this book */
   duplicateOf?: { id: string; title: string };
+  /** True when the file was added to a book already in the library (its PDF or EPUB) */
+  merged?: boolean;
 }
 
 // Imports run one at a time. Two imports of the same book at once (an upload during a folder
@@ -61,18 +64,22 @@ export class EPUBProcessor {
    * missing on one side is NOT treated as a duplicate here (it may be a different book); those
    * are listed for review in Settings instead.
    */
-  private async findCopyInLibrary(
+  async findCopyInLibrary(
     userId: string,
     candidate: { title: string; author?: string; isbn?: string }
-  ): Promise<{ id: string; title: string } | null> {
+  ): Promise<{ id: string; title: string; hasText: boolean; hasPdf: boolean } | null> {
     const links = await prisma.userBook.findMany({
       where: { userId },
-      select: { book: { select: { id: true, title: true, author: true, isbn: true } } },
+      select: {
+        book: {
+          select: { id: true, title: true, author: true, isbn: true, hasText: true, sourcePath: true },
+        },
+      },
     });
     for (const link of links) {
       const book = link.book;
       if (compareBooks({ id: 'new', ...candidate }, book) === 'sure') {
-        return { id: book.id, title: book.title };
+        return { id: book.id, title: book.title, hasText: book.hasText, hasPdf: !!book.sourcePath };
       }
     }
     return null;
@@ -112,15 +119,28 @@ export class EPUBProcessor {
       isbn: source ? undefined : normalize(structure.metadata.isbn),
     });
     if (copy) {
-      return { bookId: copy.id, created: false, duplicateOf: copy };
+      // The same book in another format. A scanned PDF has no text of its own: give it this EPUB's
+      // text (so it can be read and listened to at once), instead of waiting for text recognition.
+      // A book that already has text keeps it, so reading places and audio stay valid.
+      let merged = false;
+      if (!copy.hasText && !source) {
+        try {
+          await ocrService.cancel((await prisma.book.findUnique({ where: { id: copy.id } }))?.fileHash || '');
+          await this.attachChapters(copy.id, epubBuffer);
+          merged = true;
+        } catch (error) {
+          console.error('Could not use the EPUB as the text of a scanned PDF:', error);
+        }
+      }
+      return { bookId: copy.id, created: false, duplicateOf: { id: copy.id, title: copy.title }, merged };
     }
 
-    const filePath = path.join(config.storage.booksPath, `${fileHash}.epub`);
+    const filePath = path.join(config.storage.epubsPath, `${fileHash}.epub`);
     await saveFile(filePath, epubBuffer);
 
     let coverPath: string | undefined;
     if (structure.metadata.coverData) {
-      coverPath = path.join(config.storage.booksPath, `${fileHash}-cover.jpg`);
+      coverPath = path.join(config.storage.coversPath, `${fileHash}-cover.jpg`);
       await saveFile(coverPath, structure.metadata.coverData);
     }
 
@@ -147,6 +167,7 @@ export class EPUBProcessor {
           fileHash,
           sourceFormat: source ? 'pdf' : 'epub',
           sourcePath: source ? source.pdfPath : null,
+          pdfHash: source ? source.fileHash : null,
           hasText: true,
           epubMetadata: epubMetadata as any,
           totalWords: structure.totalWords,
@@ -231,7 +252,7 @@ export class EPUBProcessor {
       throw new Error('The recognised text has no chapters');
     }
 
-    const epubPath = path.join(config.storage.booksPath, `${book.fileHash}.epub`);
+    const epubPath = path.join(config.storage.epubsPath, `${book.fileHash}.epub`);
     await saveFile(epubPath, epubBuffer);
 
     try {

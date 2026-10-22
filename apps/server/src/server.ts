@@ -5,6 +5,8 @@ import { disconnectRedis } from './core/redis';
 import { ensureStorageDirectories } from './core/storage';
 import { ocrService } from './modules/books/ocr.service';
 import { audioPrepService } from './modules/tts/audio-prep.service';
+import { libraryService } from './modules/library/library.service';
+import { migrateToWorkFolder } from './core/storage-migration';
 
 async function start() {
   try {
@@ -29,6 +31,17 @@ async function start() {
 
     console.log(`🚀 Server running on port ${config.port}`);
     console.log(`📚 Environment: ${config.nodeEnv}`);
+
+    // Move files kept by an earlier version into the work folder (if one is set), then scan the
+    // read-only books folder in the background. Books appear in the library as they are added.
+    (async () => {
+      try {
+        await migrateToWorkFolder();
+      } catch (error) {
+        console.error('Moving files to the work folder failed:', error);
+      }
+      if (config.library.scanOnStartup) await libraryService.startScan();
+    })();
 
     // Pick up scanned PDFs whose text recognition was interrupted by a restart
     ocrService.resumePending().catch((error) => {

@@ -90,25 +90,28 @@ kokoro:
 
 Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
 
-### Library folders
+### Books folder
 
-Mount external book folders to auto-import EPUBs. Add to `docker-compose.yml` under `server.volumes`:
+Mount your books folder (read-only) and a work folder (read-write). Add to `docker-compose.yml` under `server`:
 
 ```yaml
 server:
+  environment:
+    WORK_PATH: /work
+    LIBRARY_PATH: /library
   volumes:
     - chapter_data:/app/data
-    - /path/to/your/books:/library/books:ro # Read-only mount
+    - /path/to/chapter-work:/work           # EPUBs, PDFs, covers and audio Chapter makes
+    - /path/to/your/books:/library:ro       # Read-only: your own files, never changed
 ```
 
-Then in Settings → Library, add `/library/books` as a watched folder. Chapter will scan and import books automatically.
+Chapter scans the books folder in the background every time the server starts.
 
 **Notes:**
 
-- Use container paths (e.g., `/library/books`), not host paths
-- Mount as read-only (`:ro`) for safety
-- Books are copied to internal storage (supports deduplication across folders)
-- Multiple folders can be mounted and watched
+- A PDF and an EPUB of the same book show up once; pick PDF, Read or Listen inside the book
+- Use container paths (e.g., `/library`), not host paths
+- The books folder is only ever read. Removing a book removes Chapter's copies only
 
 ## Commands
 
@@ -148,4 +151,3 @@ pnpm dev
 ## License
 
 [GPL-2.0](LICENSE)
-

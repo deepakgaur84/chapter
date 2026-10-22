@@ -1,10 +1,10 @@
 import { prisma } from '../../core/database';
-import { epubProcessor } from './epub.processor';
-import { pdfProcessor, isPdf } from './pdf.processor';
+import { libraryService } from '../library/library.service';
 import { pdfConverterService } from './pdf-converter.service';
 import { ocrService } from './ocr.service';
 import { audioPrepService } from '../tts/audio-prep.service';
 import { readFile, deleteFile, saveFile } from '../../core/storage';
+import { config } from '../../core/config';
 import { openLibraryService } from './open-library.service';
 import { groupLikelyDuplicates, pickBookToKeep } from './duplicates';
 import type { AlternativeCover } from '@chapter/types';
@@ -12,10 +12,9 @@ import path from 'path';
 
 export class BooksService {
   async uploadBook(userId: string, fileBuffer: Buffer, filename: string): Promise<any> {
-    // PDFs are recognised by their content, not their name
-    const result = isPdf(fileBuffer)
-      ? await pdfProcessor.importPDF(userId, fileBuffer, filename)
-      : await epubProcessor.importEPUB(userId, fileBuffer, filename);
+    // PDFs are recognised by their content, not their name. A PDF or EPUB of a book that is
+    // already in the library is added to that book instead of becoming a second one.
+    const result = await libraryService.ingest([userId], fileBuffer, filename, { origin: 'upload' });
     const book = await this.getBookById(userId, result.bookId);
     // When the file was a copy of a book already in the library, say which one
     return result.duplicateOf ? { ...book, duplicateOf: result.duplicateOf } : book;
@@ -42,6 +41,7 @@ export class BooksService {
             totalCharacters: true,
             totalChapters: true,
             sourceFormat: true,
+            sourcePath: true,
             hasText: true,
             pageCount: true,
             ocrStatus: true,
@@ -64,16 +64,21 @@ export class BooksService {
       },
     });
 
-    return userBooks.map((ub) => ({
-      ...ub.book,
-      isFavorite: ub.isFavorite,
-      isArchived: ub.isArchived,
-      rating: ub.rating,
-      tags: ub.tags,
-      addedAt: ub.addedAt,
-      lastReadAt: ub.book.readingProgress[0]?.lastReadAt || null,
-      progress: ub.book.readingProgress[0]?.percentage || 0,
-    }));
+    return userBooks.map((ub) => {
+      const { sourcePath, ...book } = ub.book;
+      return {
+        ...book,
+        // True when the book has a PDF to look at (it is then opened as a PDF first)
+        hasPdf: !!sourcePath,
+        isFavorite: ub.isFavorite,
+        isArchived: ub.isArchived,
+        rating: ub.rating,
+        tags: ub.tags,
+        addedAt: ub.addedAt,
+        lastReadAt: ub.book.readingProgress[0]?.lastReadAt || null,
+        progress: ub.book.readingProgress[0]?.percentage || 0,
+      };
+    });
   }
 
   async getBookById(userId: string, bookId: string): Promise<any> {
@@ -95,6 +100,7 @@ export class BooksService {
 
     return {
       ...userBook.book,
+      hasPdf: !!userBook.book.sourcePath,
       isFavorite: userBook.isFavorite,
       isArchived: userBook.isArchived,
       rating: userBook.rating,
@@ -186,14 +192,21 @@ export class BooksService {
           }
         }
 
-        // These are Chapter's own stored copies (data/books/<hash>.epub, and for a PDF book the
-        // converted EPUB plus the stored original PDF; for a scanned book both are the same file).
-        // For a PDF book that is the converted EPUB plus the stored original PDF (for a scanned
-        // book both are the same file). The original in a watched folder is never touched here.
+        // These are Chapter's own copies in the work folder (the EPUB, the PDF and the cover; for
+        // a scanned book the EPUB and PDF are the same file). The books folder is read-only and
+        // never touched.
         if (book.sourcePath) {
           // Stop the converter if it is still recognising this scan, and let it forget the job
-          await ocrService.cancel(book.fileHash);
+          await ocrService.cancel(book.pdfHash ?? book.fileHash);
         }
+
+        // Remember which files of the books folder belonged to this book, so the next scan does
+        // not add it back. Files that came from an upload are simply forgotten.
+        await prisma.bookFile.updateMany({
+          where: { bookId, origin: 'library' },
+          data: { ignored: true },
+        });
+        await prisma.bookFile.deleteMany({ where: { bookId, origin: 'upload' } });
         const storedFiles = new Set<string>([book.filePath]);
         if (book.sourcePath) storedFiles.add(book.sourcePath);
         for (const storedFile of storedFiles) {
@@ -266,7 +279,7 @@ export class BooksService {
       throw new Error('Page not found');
     }
 
-    return await pdfConverterService.renderPage(book.fileHash, page, width);
+    return await pdfConverterService.renderPage(book.pdfHash ?? book.fileHash, page, width);
   }
 
   async getAlternativeCovers(userId: string, bookId: string): Promise<AlternativeCover[]> {
@@ -286,7 +299,7 @@ export class BooksService {
     const extension = coverUrl.includes('.png') ? 'png' : 'jpg';
     // fileHash, not the file name: a scanned PDF book is stored as <hash>.pdf
     const fileHash = book.fileHash;
-    const coverPath = path.join(path.dirname(book.filePath), `${fileHash}-cover.${extension}`);
+    const coverPath = path.join(config.storage.coversPath, `${fileHash}-cover.${extension}`);
 
     if (book.coverPath && book.coverPath !== coverPath) {
       await deleteFile(book.coverPath);
@@ -394,6 +407,32 @@ export class BooksService {
   }
 
   /**
+   * Before a duplicate is removed: its source files (PDF, EPUB) become files of the book that is
+   * kept, and if the kept book has no PDF yet it takes over the duplicate's PDF.
+   */
+  private async absorbFiles(keepId: string, removeId: string): Promise<void> {
+    const [keep, removed] = await Promise.all([
+      prisma.book.findUnique({ where: { id: keepId } }),
+      prisma.book.findUnique({ where: { id: removeId } }),
+    ]);
+    if (!keep || !removed) return;
+
+    await prisma.bookFile.updateMany({ where: { bookId: removeId }, data: { bookId: keepId } });
+
+    if (!keep.sourcePath && removed.sourcePath && removed.hasText) {
+      const pdf = {
+        sourcePath: removed.sourcePath,
+        pdfHash: removed.pdfHash ?? removed.fileHash,
+        pageCount: removed.pageCount,
+        pageAspect: removed.pageAspect,
+      };
+      // Let go of the PDF first: deleting the removed book deletes the files it still points to
+      await prisma.book.update({ where: { id: removeId }, data: { sourcePath: null, pdfHash: null } });
+      await prisma.book.update({ where: { id: keepId }, data: pdf });
+    }
+  }
+
+  /**
    * Remove duplicate copies, keeping one book per group. The removed copies' generated audio is
    * deleted with them; a favourite mark moves to the book that is kept. Files in watched folders
    * are not touched.
@@ -418,6 +457,7 @@ export class BooksService {
         });
         if (!link) continue;
         favorite = favorite || link.isFavorite;
+        await this.absorbFiles(merge.keepId, removeId);
         await this.deleteBook(userId, removeId);
         removed += 1;
       }

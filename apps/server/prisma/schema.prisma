@@ -50,7 +50,8 @@ model Book {
 
   // Source format: "epub", or "pdf" (PDFs are converted to an EPUB on import)
   sourceFormat String  @default("epub")
-  sourcePath   String? // Stored copy of the original PDF
+  sourcePath   String? // Working copy of the book's PDF (in the work folder), if it has one
+  pdfHash      String? // SHA256 of that PDF (the page viewer and text recognition find it by this)
   // False for scanned PDFs: no readable text, so no reader text or listening, only the PDF itself
   hasText      Boolean @default(true)
 
@@ -77,6 +78,7 @@ model Book {
 
   // Relations
   audioPrep       AudioPrep?
+  files           BookFile[]
   chapters        Chapter[]
   userBooks       UserBook[]
   readingProgress ReadingProgress[]
@@ -250,6 +252,29 @@ model UserBook {
   @@unique([userId, bookId])
   @@index([userId])
   @@index([bookId])
+}
+
+// Every source file Chapter knows about (a PDF and an EPUB of the same book are two files, one
+// book). The books folder is scanned against this list, so a file that is already known is not
+// read again, and a book you removed (ignored = true) does not come back on the next scan.
+model BookFile {
+  id        String   @id @default(cuid())
+  bookId    String?
+  book      Book?    @relation(fields: [bookId], references: [id], onDelete: SetNull)
+
+  hash      String   @unique // SHA256 of the file
+  size      Int
+  format    String   // "epub" | "pdf"
+  origin    String   @default("library") // "library" (books folder) | "upload"
+  path      String?  // where it was found in the books folder
+  mtimeMs   Float?
+  ignored   Boolean  @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([bookId])
+  @@index([path])
 }
 
 model WatchedFolder {

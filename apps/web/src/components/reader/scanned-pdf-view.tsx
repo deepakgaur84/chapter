@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, ExternalLink, FileText, Loader2 } from 'lucide-react';
 import { apiClient } from '@/lib/api-client';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,8 @@ interface ScannedBook {
   pageCount?: number | null;
   pageAspect?: number | null;
   epubMetadata?: { pages?: number } | null;
+  /** True for a book that also has readable text: the PDF is then just one way to read it */
+  hasText?: boolean;
   ocrStatus?: string | null;
   ocrProgress?: number | null;
   ocrError?: string | null;
@@ -27,6 +29,8 @@ interface ScannedPdfViewProps {
   onPositionChange?: (percentage: number) => void;
   /** Ask the server to (re)start text recognition. The parent refreshes the book afterwards. */
   onStartOcr?: () => Promise<void>;
+  /** Extra controls in the header (the PDF / Read / Listen switch) */
+  headerExtra?: ReactNode;
 }
 
 const DEFAULT_ASPECT = 1.414; // A4, until the real page shape is known
@@ -109,6 +113,7 @@ export function ScannedPdfView({
   restorePosition,
   onPositionChange,
   onStartOcr,
+  headerExtra,
 }: ScannedPdfViewProps) {
   const pageCount = book.pageCount || book.epubMetadata?.pages || 0;
   const aspect = book.pageAspect || DEFAULT_ASPECT;
@@ -223,6 +228,7 @@ export function ScannedPdfView({
             <p className="text-xs text-[hsl(var(--reader-text))]/60 truncate">{book.author}</p>
           )}
         </div>
+        {headerExtra}
         {isOnline && (
           <button
             type="button"
@@ -236,6 +242,7 @@ export function ScannedPdfView({
         )}
       </header>
 
+      {!book.hasText && (
       <div role="status" className="mt-4 mx-auto w-full max-w-3xl px-4 box-border">
         <div className="flex items-start gap-3 rounded-2xl border border-[hsl(var(--reader-text))]/10 bg-[hsl(var(--reader-text))]/5 p-4">
           {working ? (
@@ -303,6 +310,7 @@ export function ScannedPdfView({
           </div>
         </div>
       </div>
+      )}
 
       {!isOnline ? (
         <p className="mx-auto w-full max-w-3xl px-4 mt-4 text-sm text-[hsl(var(--reader-text))]/60">

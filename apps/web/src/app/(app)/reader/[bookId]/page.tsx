@@ -12,7 +12,7 @@ import { useSettingsStore } from '@/lib/stores/settings-store';
 import { useOnlineStatus } from '@/lib/hooks/use-online-status';
 import { ChapterNav } from '@/components/reader/chapter-nav';
 import { AudioPlayer } from '@/components/reader/AudioPlayer';
-import { ReaderMode } from '@/components/reader/ModeToggle';
+import { ModeToggle, ReaderMode } from '@/components/reader/ModeToggle';
 import { ReadAlongView } from '@/components/reader/ReadAlongView';
 import { UnifiedControls } from '@/components/reader/unified-controls';
 import { ScannedPdfView } from '@/components/reader/scanned-pdf-view';
@@ -44,8 +44,13 @@ export default function ReaderPage() {
   const [currentScrollProgress, setCurrentScrollProgress] = useState(0);
   const [currentAudioTime, setCurrentAudioTime] = useState(0);
   const [currentAudioChunk, setCurrentAudioChunk] = useState<string | null>(null);
+  // Where the PDF view starts, as a percentage of the whole book
+  const [pdfStartPercent, setPdfStartPercent] = useState(0);
+  const initialModeDone = useRef(false);
+  const pendingListenRef = useRef(false);
+  const modeChangeRef = useRef<(mode: ReaderMode) => void>(() => {});
 
-  const { progress, updateProgress, saveNow } = useProgress(bookId);
+  const { progress, updateProgress, saveNow, isLoaded: progressLoaded } = useProgress(bookId);
   const { data: chapter, isLoading: chapterLoading } = useChapter(bookId, currentChapter);
   const { isOnline } = useOnlineStatus();
   const { tts } = useSettingsStore();
@@ -112,13 +117,24 @@ export default function ReaderPage() {
     }
   }, [isAuthenticated, authLoading, router]);
 
+  // A book that has a PDF opens as a PDF, unless it was last being listened to
+  useEffect(() => {
+    if (initialModeDone.current || !book || progressLoaded === false) return;
+    initialModeDone.current = true;
+    if (book.hasText !== false && book.hasPdf && isOnline && progress?.mode !== 'audio') {
+      setPdfStartPercent(progress?.percentage ?? 0);
+      setMode('pdf');
+    }
+  }, [book, progress, progressLoaded, isOnline]);
+
   // Restore progress on mount
   useEffect(() => {
     if (progress && !isProgressRestored) {
       setCurrentChapter(progress.chapterIndex);
       setCurrentScrollProgress(progress.scrollPosition || 0);
       const restoredMode = progress.mode === 'audio' ? 'listening' : 'reading';
-      setMode(restoredMode);
+      // A book that opens in its PDF stays there; listening is restored as it was
+      setMode((current) => (restoredMode === 'listening' ? 'listening' : current === 'pdf' ? 'pdf' : 'reading'));
 
       // Restore audio position if in listening mode
       if (restoredMode === 'listening' && progress.audioTimestamp !== undefined) {
@@ -151,7 +167,7 @@ export default function ReaderPage() {
 
   // Switch to reading mode if we go offline while listening
   useEffect(() => {
-    if (!isOnline && mode === 'listening') {
+    if (!isOnline && (mode === 'listening' || mode === 'pdf')) {
       setMode('reading');
     }
   }, [isOnline, mode]);
@@ -237,6 +253,54 @@ export default function ReaderPage() {
     });
   }, [book?.hasText, hadScanPlace, progress, structure, updateProgress]);
 
+  // Find the chapter and the place inside it that a share of the whole book (0-100) falls on
+  const locateByPercent = useCallback(
+    (percent: number) => {
+      const chapters: any[] = structure?.chapters || [];
+      if (chapters.length === 0) return null;
+      const total = chapters[chapters.length - 1].endPosition || 0;
+      const target = (percent / 100) * total;
+      const withText = chapters.filter((c) => (c.charCount ?? 1) > 0);
+      const hit =
+        withText.find((c) => target >= c.startPosition && target < c.endPosition) ||
+        withText[withText.length - 1] ||
+        chapters[0];
+      const span = hit.endPosition - hit.startPosition;
+      const within = span > 0 ? Math.min(100, Math.max(0, ((target - hit.startPosition) / span) * 100)) : 0;
+      return { index: hit.index as number, id: hit.id as string, within };
+    },
+    [structure]
+  );
+
+  // The PDF view of a book that also has text: keep the place so Read and Listen continue from it
+  const handlePdfPosition = useCallback(
+    (percentage: number) => {
+      const place = locateByPercent(percentage);
+      if (place) {
+        setCurrentChapter(place.index);
+        setCurrentScrollProgress(place.within);
+        setMappedScroll(place.within);
+      }
+      updateProgress({
+        chapterIndex: place?.index ?? currentChapter,
+        chapterId: place?.id ?? chapterId,
+        scrollPosition: place?.within ?? 0,
+        percentage,
+        audioChunkId: '',
+        mode: 'reading',
+      });
+    },
+    [locateByPercent, updateProgress, currentChapter, chapterId]
+  );
+
+  // Switching from the PDF to Listen: show the text first, then start listening from that place
+  useEffect(() => {
+    if (!pendingListenRef.current || mode !== 'reading') return;
+    if (!chapter || chapterLoading || !pipeline.isPlanReady) return;
+    pendingListenRef.current = false;
+    modeChangeRef.current('listening');
+  });
+
   if (authLoading || bookLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -299,6 +363,47 @@ export default function ReaderPage() {
 
   const handleModeChange = (newMode: ReaderMode) => {
     const oldMode = mode;
+    if (newMode === oldMode) return;
+
+    // Leaving the PDF: the text opens at the same place. Listening starts once that text is loaded.
+    if (oldMode === 'pdf') {
+      setMode('reading');
+      if (newMode === 'listening') pendingListenRef.current = true;
+      updateProgress({ chapterIndex: currentChapter, chapterId, mode: 'reading' });
+      return;
+    }
+
+    // Going to the PDF: from the place reached in the text
+    if (newMode === 'pdf') {
+      let scroll = currentScrollProgress;
+      if (oldMode === 'listening' && audioChunks.length > 0 && progress?.audioChunkId) {
+        const chapterTextNow = chapter?.paragraphs?.map((p: any) => p.text).join('\n\n') || '';
+        scroll = audioToReadingPosition(
+          chunkKey(resolveChunkIndex(audioChunks, progress.audioChunkId)),
+          progress.audioTimestamp || 0,
+          chapterTextNow,
+          audioChunks.map((chunk) => ({
+            id: chunkKey(chunk.index),
+            startPosition: chunk.startPosition,
+            endPosition: chunk.endPosition,
+            audioDuration: chunk.audioDuration,
+          }))
+        );
+      }
+      const percent = ((chapterPosition + scroll / 100) / (visibleCount || 1)) * 100;
+      setPdfStartPercent(percent);
+      setMode('pdf');
+      updateProgress({
+        chapterIndex: currentChapter,
+        chapterId,
+        scrollPosition: scroll,
+        percentage: percent,
+        audioChunkId: '',
+        mode: 'reading',
+      });
+      return;
+    }
+
     setMode(newMode);
 
     const chapterText = chapter?.paragraphs?.map((p: any) => p.text).join('\n\n') || '';
@@ -360,6 +465,24 @@ export default function ReaderPage() {
     });
   };
 
+  modeChangeRef.current = handleModeChange;
+
+  // A book with text and a PDF, shown as its PDF pages
+  if (mode === 'pdf' && book.hasPdf) {
+    return (
+      <ScannedPdfView
+        book={book}
+        isOnline={isOnline}
+        onBack={() => router.push('/library')}
+        restorePosition={pdfStartPercent}
+        onPositionChange={handlePdfPosition}
+        headerExtra={
+          <ModeToggle mode={mode} onModeChange={handleModeChange} hasPdf disableListening={!isOnline} />
+        }
+      />
+    );
+  }
+
   const currentChapterData = structure?.chapters[currentChapter];
 
   const estimatedProgress = structure
@@ -388,11 +511,13 @@ export default function ReaderPage() {
           isLoading={chapterLoading}
           onScrollProgress={handleScrollProgress}
           initialScrollPosition={
-            !isProgressRestored
-              ? undefined
-              : hadScanPlace && mappedScroll === null
-                ? undefined // wait until the place in the page viewer has been turned into a chapter
-                : (mappedScroll ?? progress?.scrollPosition)
+            mappedScroll !== null
+              ? mappedScroll // the place reached in the PDF pages
+              : !isProgressRestored
+                ? undefined
+                : hadScanPlace
+                  ? undefined // wait until the place in the page viewer has been turned into a chapter
+                  : progress?.scrollPosition
           }
         />
       </div>

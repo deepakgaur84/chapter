@@ -6,11 +6,6 @@ import type {
   UserSettings,
   KokoroVoice,
   AlternativeCover,
-  WatchedFolder,
-  CreateWatchedFolderRequest,
-  UpdateWatchedFolderRequest,
-  ScanResult,
-  FolderScanStatus,
 } from '@chapter/types';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
@@ -70,10 +65,26 @@ export interface DuplicateGroup {
   }>;
 }
 
-/** What happened to the original files when a book was deleted with the folder option. */
-export interface DeleteBookResult {
-  deleted: number;
-  failed: { path: string; error: string }[];
+export interface LibraryScanStatus {
+  state: 'idle' | 'scanning';
+  libraryPath: string;
+  total: number;
+  done: number;
+  imported: number;
+  merged: number;
+  skipped: number;
+  failed: number;
+  current: string | null;
+  errors: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface HiddenBookFile {
+  id: string;
+  name: string;
+  format: string;
+  size: number;
 }
 
 class APIClient {
@@ -208,12 +219,9 @@ class APIClient {
     return response.blob();
   }
 
-  async deleteBook(bookId: string, deleteSourceFiles = false): Promise<DeleteBookResult> {
-    const query = deleteSourceFiles ? '?deleteSourceFiles=true' : '';
-    const result = await this.request<Partial<DeleteBookResult>>(`/books/${bookId}${query}`, {
-      method: 'DELETE',
-    });
-    return { deleted: result.deleted ?? 0, failed: result.failed ?? [] };
+  /** Remove a book from the library. Files in the books folder are never touched. */
+  async deleteBook(bookId: string): Promise<void> {
+    await this.request<void>(`/books/${bookId}`, { method: 'DELETE' });
   }
 
   async getEpubFile(bookId: string): Promise<ArrayBuffer> {
@@ -416,47 +424,20 @@ class APIClient {
     });
   }
 
-  async getWatchedFolders(): Promise<WatchedFolder[]> {
-    return this.request<WatchedFolder[]>('/library/folders');
+  // ---- Books folder (read-only, scanned by the server) ------------------------------------------
+  async getLibraryStatus(): Promise<LibraryScanStatus> {
+    return this.request<LibraryScanStatus>('/library/status');
   }
 
-  async createWatchedFolder(data: CreateWatchedFolderRequest): Promise<WatchedFolder> {
-    return this.request<WatchedFolder>('/library/folders', {
+  async getHiddenBooks(): Promise<{ files: HiddenBookFile[] }> {
+    return this.request('/library/hidden');
+  }
+
+  async restoreHiddenBooks(ids?: string[]): Promise<{ restored: number }> {
+    return this.request('/library/restore', {
       method: 'POST',
-      body: JSON.stringify(data),
+      body: JSON.stringify(ids ? { ids } : {}),
     });
-  }
-
-  async updateWatchedFolder(
-    folderId: string,
-    data: UpdateWatchedFolderRequest
-  ): Promise<WatchedFolder> {
-    return this.request<WatchedFolder>(`/library/folders/${folderId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(data),
-    });
-  }
-
-  async deleteWatchedFolder(folderId: string): Promise<void> {
-    await this.request<void>(`/library/folders/${folderId}`, {
-      method: 'DELETE',
-    });
-  }
-
-  async scanFolder(folderId: string): Promise<ScanResult> {
-    return this.request<ScanResult>(`/library/folders/${folderId}/scan`, {
-      method: 'POST',
-    });
-  }
-
-  async scanAllFolders(): Promise<ScanResult[]> {
-    return this.request<ScanResult[]>('/library/scan-all', {
-      method: 'POST',
-    });
-  }
-
-  async getFolderScanStatus(folderId: string): Promise<FolderScanStatus> {
-    return this.request<FolderScanStatus>(`/library/folders/${folderId}/status`);
   }
 
   async getMetadataStats(): Promise<{

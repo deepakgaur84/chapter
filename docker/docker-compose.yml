@@ -62,8 +62,10 @@ services:
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
       PORT: 3001
-      BOOK_STORAGE_PATH: /app/data/books
-      AUDIO_CACHE_PATH: /app/data/audio
+      # Everything Chapter writes (EPUBs, PDFs, covers, audio) goes in this one folder
+      WORK_PATH: /app/data/work
+      # Your books folder (read-only, scanned in the background when the server starts)
+      LIBRARY_PATH: /library
       AUDIO_CACHE_MAX_SIZE: ${AUDIO_CACHE_MAX_SIZE:-10737418240}
       KOKORO_SERVICE_URL: http://kokoro:5000
       TTS_DEFAULT_VOICE: af_bella

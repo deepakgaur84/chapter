@@ -1,5 +1,6 @@
 import { FastifyPluginAsync } from 'fastify';
 import { authService } from './auth.service';
+import { libraryService } from '../library/library.service';
 import { seedService } from '../books/seed.service';
 import { z } from 'zod';
 import { UserRegistration, UserLogin } from '@chapter/types';
@@ -27,6 +28,10 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
       const userId = (result.user as any).id;
       seedService.seedBooksForUser(userId).catch((error) => {
         console.error('Failed to seed books for new user:', error);
+      });
+      // Give the new person the books of the books folder too
+      libraryService.onUserCreated(userId).catch((error) => {
+        console.error('Failed to add library books for new user:', error);
       });
 
       return reply.code(201).send(result);

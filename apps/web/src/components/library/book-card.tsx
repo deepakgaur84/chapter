@@ -111,7 +111,6 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [alsoDeleteFile, setAlsoDeleteFile] = useState(false);
   const { downloadBook, isDownloading, progress } = useDownload();
   const audioPrep = useAudioPrep();
   const prep = audioPrep.getBook(book.id);
@@ -209,7 +208,6 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
     if (isDeleting) return;
     setShowDeleteConfirm(false);
     setDeleteError(null);
-    setAlsoDeleteFile(false);
   }, [isDeleting]);
 
   // Close the delete confirmation with Escape
@@ -222,23 +220,15 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [showDeleteConfirm, closeDeleteConfirm]);
 
-  // Remove the book from the library. By default only Chapter's own copy is deleted and the
-  // original .epub or .pdf in any watched folder is left alone. With the checkbox ticked, the original
-  // file(s) in the watched folders are deleted too, so a rescan cannot bring the book back.
+  // Remove the book from the library. Chapter's own copies (EPUB, PDF, cover, audio) are deleted.
+  // The original files in the books folder are read-only and are never touched; the server
+  // remembers the book was removed, so the next scan does not add it back.
   const handleConfirmDelete = async () => {
     if (isDeleting) return;
     setIsDeleting(true);
     setDeleteError(null);
     try {
-      const result = await deleteBook(book.id, alsoDeleteFile);
-      if (result && result.failed.length > 0) {
-        // The book is already gone from the library; tell the user the file is still there
-        window.alert(
-          `The book was removed from the library, but ${result.failed.length} file(s) could not ` +
-            `be deleted from the folder, so it may be added again on the next scan:\n\n` +
-            result.failed.map((f) => `${f.path}: ${f.error}`).join('\n')
-        );
-      }
+      await deleteBook(book.id);
     } catch (error) {
       console.error('Failed to delete book:', error);
       setDeleteError(error instanceof Error ? error.message : 'Could not delete the book');
@@ -665,27 +655,10 @@ export const BookCard = memo(function BookCard({ book }: BookCardProps) {
               <p className="mt-2 text-sm text-white/80 font-medium line-clamp-2">{book.title}</p>
               <p className="mt-3 text-sm text-white/60 leading-relaxed">
                 This removes the book, your reading progress and its generated audio from Chapter.
-                {alsoDeleteFile
-                  ? ' The original book file (EPUB or PDF) in your watched folder will also be permanently deleted.'
-                  : ' The original file in your folder is not touched. If the book is in a watched folder, it will be added again the next time that folder is scanned.'}
+                The original file in your books folder is not touched, and the book will not be
+                added again by the next scan. A book that came from your books folder can be brought back
+                from Settings.
               </p>
-              <label className="mt-4 flex items-start gap-3 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={alsoDeleteFile}
-                  onChange={(e) => setAlsoDeleteFile(e.target.checked)}
-                  disabled={isDeleting}
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-red-600"
-                />
-                <span className="text-sm text-white/80 leading-snug">
-                  Also delete the file from the folder
-                  <span className="block text-xs text-white/50 mt-0.5">
-                    Permanently deletes the original file from your watched folders so a rescan
-                    cannot add it back. This cannot be undone. Only files that exactly match this
-                    book are deleted.
-                  </span>
-                </span>
-              </label>
               {deleteError && (
                 <p className="mt-3 text-sm text-red-400" role="alert">
                   {deleteError}

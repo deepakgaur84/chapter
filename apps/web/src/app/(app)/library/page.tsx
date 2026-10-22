@@ -8,6 +8,7 @@ import { BookCard } from '@/components/library/book-card';
 import { UploadingBookCard } from '@/components/library/uploading-book-card';
 import { UploadButton } from '@/components/library/upload-button';
 import { Bookshelf } from '@/components/library/bookshelf';
+import { ScanBanner } from '@/components/library/scan-banner';
 import { Select } from '@base-ui/react/select';
 import { Slider } from '@base-ui/react/slider';
 import { Settings, Search, X, ChevronDown, Check, Star, WifiOff } from 'lucide-react';
@@ -442,6 +443,9 @@ export default function LibraryPage() {
           </div>
         </div>
       )}
+
+      {/* Progress of the background scan of the books folder */}
+      <ScanBanner />
 
       {/* Main Content */}
       <main

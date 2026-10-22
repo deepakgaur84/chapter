@@ -34,6 +34,8 @@ const AUTOSAVE_INTERVAL = 5000; // Auto-save every 5 seconds
 export function useProgress(bookId: string | null) {
   const [progress, setProgress] = useState<ReadingProgress | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // True once the saved place has been fetched (or the fetch failed), even if there is none
+  const [isLoaded, setIsLoaded] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
   const pendingUpdateRef = useRef<ProgressUpdate | null>(null);
@@ -55,6 +57,7 @@ export function useProgress(bookId: string | null) {
         console.error('Failed to fetch progress:', err);
       } finally {
         setIsLoading(false);
+        setIsLoaded(true);
       }
     };
 
@@ -125,6 +128,7 @@ export function useProgress(bookId: string | null) {
   return {
     progress,
     isLoading,
+    isLoaded,
     error,
     updateProgress,
     saveNow,
