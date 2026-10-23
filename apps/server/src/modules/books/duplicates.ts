@@ -48,6 +48,18 @@ export function authorSurnames(author: string | null | undefined): string[] {
   return surnames;
 }
 
+/** Every name part of the author(s), lower case, without initials: "Pape, Scott" -> pape, scott */
+export function authorNameParts(author: string | null | undefined): string[] {
+  if (!author) return [];
+  return author
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s'-]/g, ' ')
+    .split(/\s+/)
+    .filter((part) => part.length > 2 && part !== 'and');
+}
+
 export function normalizeIsbn(isbn: string | null | undefined): string {
   const digits = (isbn || '').replace(/[^0-9Xx]/g, '').toUpperCase();
   return digits.length === 10 || digits.length === 13 ? digits : '';
@@ -74,7 +86,12 @@ export function compareBooks(a: BookKey, b: BookKey): Match {
   const authorsA = authorSurnames(a.author);
   const authorsB = authorSurnames(b.author);
   if (authorsA.length === 0 || authorsB.length === 0) return 'check';
-  return authorsA.some((name) => authorsB.includes(name)) ? 'sure' : 'none';
+  if (authorsA.some((name) => authorsB.includes(name))) return 'sure';
+  // "Scott Pape" and "Pape Scott" (or "Pape, Scott") are the same person: with the same title,
+  // any shared name part is enough
+  const partsA = authorNameParts(a.author);
+  const partsB = authorNameParts(b.author);
+  return partsA.some((part) => partsB.includes(part)) ? 'sure' : 'none';
 }
 
 export interface DuplicateGroup<T extends BookKey> {

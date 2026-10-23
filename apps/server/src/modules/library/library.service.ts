@@ -259,7 +259,9 @@ export class LibraryService {
       try {
         const groups = await booksService.findDuplicateGroups(userId);
         const merges = groups
-          .filter((group) => group.confidence === 'sure')
+          // "check" groups have the same title and one side without an author: the same book
+          // in practice, so they are merged too
+          .filter((group) => group.confidence === 'sure' || group.confidence === 'check')
           .map((group) => ({
             keepId: group.keepId,
             removeIds: group.books.map((book) => book.id).filter((id) => id !== group.keepId),
