@@ -205,7 +205,15 @@ export class LibraryService {
       try {
         const stat = await fs.stat(file);
         const known = await prisma.bookFile.findFirst({ where: { path: file } });
-        if (known && known.size === stat.size && known.mtimeMs === stat.mtimeMs && (known.bookId || known.ignored)) {
+        // A PDF whose book is still missing its pages is looked at again, so the scan completes it
+        const incomplete =
+          known?.format === 'pdf' && known.bookId
+            ? await prisma.book.findFirst({
+                where: { id: known.bookId, OR: [{ sourcePath: null }, { pageCount: null }, { pageAspect: null }] },
+                select: { id: true },
+              })
+            : null;
+        if (known && !incomplete && known.size === stat.size && known.mtimeMs === stat.mtimeMs && (known.bookId || known.ignored)) {
           this.status.skipped++;
         } else {
           const buffer = await fs.readFile(file);
@@ -229,11 +237,42 @@ export class LibraryService {
     }
 
     // People may have signed up while the scan ran
-    await this.linkLibraryBooks((await prisma.user.findMany({ select: { id: true } })).map((u) => u.id));
+    const everyone = (await prisma.user.findMany({ select: { id: true } })).map((u) => u.id);
+    await this.linkLibraryBooks(everyone);
+    await this.mergeSureDuplicates(everyone);
     console.log(
       `📚 Library scan done: ${this.status.imported} added, ${this.status.merged} merged, ` +
         `${this.status.skipped} unchanged, ${this.status.failed} failed`
     );
+  }
+
+  /**
+   * Books that are certainly the same (same ISBN, or same title and author) are merged into one
+   * entry, so a PDF and an EPUB of a book never show up twice. Less certain matches are left for
+   * the person to check in Settings -> Duplicate Books.
+   */
+  async mergeSureDuplicates(userIds: string[]): Promise<number> {
+    // Loaded here because the books service itself uses this one
+    const { booksService } = await import('../books/books.service');
+    let removed = 0;
+    for (const userId of userIds) {
+      try {
+        const groups = await booksService.findDuplicateGroups(userId);
+        const merges = groups
+          .filter((group) => group.confidence === 'sure')
+          .map((group) => ({
+            keepId: group.keepId,
+            removeIds: group.books.map((book) => book.id).filter((id) => id !== group.keepId),
+          }));
+        if (merges.length > 0) removed += (await booksService.mergeDuplicates(userId, merges)).removed;
+      } catch (error) {
+        console.error('Merging duplicate books failed:', (error as Error).message);
+        if (this.status.errors.length < 20) this.status.errors.push(`Merging duplicates: ${(error as Error).message}`);
+      }
+    }
+    this.status.merged += removed;
+    if (removed > 0) console.log(`📚 Merged ${removed} duplicate book(s) into one entry each`);
+    return removed;
   }
 
   /** Make sure these people have every book that came from the books folder */

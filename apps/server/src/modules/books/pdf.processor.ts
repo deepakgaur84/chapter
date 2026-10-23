@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import fs from 'fs/promises';
 import path from 'path';
 import { prisma } from '../../core/database';
 import { config } from '../../core/config';
@@ -37,6 +38,7 @@ export class PDFProcessor {
     const existing = await prisma.book.findUnique({ where: { fileHash } });
     if (existing) {
       await epubProcessor.linkBookToUser(userId, existing.id);
+      await this.completePdf(existing, pdfBuffer, fileHash);
       return { bookId: existing.id, created: false };
     }
 
@@ -81,6 +83,40 @@ export class PDFProcessor {
     } catch (error) {
       await deleteFile(pdfPath);
       throw error;
+    }
+  }
+
+  /**
+   * The book of this very PDF is already in the library. Make sure it has everything the PDF view
+   * needs: a stored copy of the PDF, its name for the PDF service, the page count and page shape.
+   * Whatever is missing is filled in, so every scan leaves books complete.
+   */
+  private async completePdf(
+    book: { id: string; sourcePath: string | null; pdfHash: string | null; pageCount: number | null; pageAspect: number | null },
+    pdfBuffer: Buffer,
+    pdfHash: string
+  ): Promise<void> {
+    try {
+      const pdfPath = path.join(config.storage.pdfsPath, `${pdfHash}.pdf`);
+      const stored = await fs.stat(pdfPath).then((s) => s.size === pdfBuffer.length, () => false);
+      if (!stored) await saveFile(pdfPath, pdfBuffer);
+
+      const complete =
+        book.sourcePath && book.pdfHash && book.pageCount && book.pageAspect && stored && book.sourcePath === pdfPath;
+      if (complete) return;
+
+      const info = await pdfConverterService.getInfo(pdfHash);
+      await prisma.book.update({
+        where: { id: book.id },
+        data: {
+          sourcePath: pdfPath,
+          pdfHash,
+          pageCount: info.pages > 0 ? info.pages : book.pageCount,
+          pageAspect: info.aspect || book.pageAspect,
+        },
+      });
+    } catch (error) {
+      console.warn(`Could not complete the PDF of book ${book.id}:`, (error as Error).message);
     }
   }
 

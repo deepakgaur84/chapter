@@ -10,6 +10,19 @@ import { groupLikelyDuplicates, pickBookToKeep } from './duplicates';
 import type { AlternativeCover } from '@chapter/types';
 import path from 'path';
 
+/**
+ * The name the PDF service knows a book's PDF by: the file is stored as <hash>.pdf. Books from
+ * before PDFs were tracked have no pdfHash, so it comes from the stored file's name.
+ */
+function pdfKeyOf(book: { pdfHash?: string | null; sourcePath?: string | null; fileHash: string }): string {
+  if (book.pdfHash) return book.pdfHash;
+  if (book.sourcePath) {
+    const name = path.basename(book.sourcePath);
+    if (name.toLowerCase().endsWith('.pdf')) return name.slice(0, -4);
+  }
+  return book.fileHash;
+}
+
 export class BooksService {
   async uploadBook(userId: string, fileBuffer: Buffer, filename: string): Promise<any> {
     // PDFs are recognised by their content, not their name. A PDF or EPUB of a book that is
@@ -98,9 +111,27 @@ export class BooksService {
       throw new Error('Book not found');
     }
 
+    let book = userBook.book;
+    // A book with a PDF but no page count (older imports): ask the PDF service and remember it,
+    // otherwise the PDF view has no pages to show
+    if (book.sourcePath && (!book.pageCount || !book.pageAspect)) {
+      try {
+        const key = pdfKeyOf(book);
+        const info = await pdfConverterService.getInfo(key);
+        if (info.pages > 0) {
+          book = await prisma.book.update({
+            where: { id: book.id },
+            data: { pageCount: info.pages, pageAspect: info.aspect || book.pageAspect, pdfHash: book.pdfHash ?? key },
+          });
+        }
+      } catch (error) {
+        console.warn(`Could not read the page count of "${book.title}":`, (error as Error).message);
+      }
+    }
+
     return {
-      ...userBook.book,
-      hasPdf: !!userBook.book.sourcePath,
+      ...book,
+      hasPdf: !!book.sourcePath,
       isFavorite: userBook.isFavorite,
       isArchived: userBook.isArchived,
       rating: userBook.rating,
@@ -197,7 +228,7 @@ export class BooksService {
         // never touched.
         if (book.sourcePath) {
           // Stop the converter if it is still recognising this scan, and let it forget the job
-          await ocrService.cancel(book.pdfHash ?? book.fileHash);
+          await ocrService.cancel(pdfKeyOf(book));
         }
 
         // Remember which files of the books folder belonged to this book, so the next scan does
@@ -279,7 +310,7 @@ export class BooksService {
       throw new Error('Page not found');
     }
 
-    return await pdfConverterService.renderPage(book.pdfHash ?? book.fileHash, page, width);
+    return await pdfConverterService.renderPage(pdfKeyOf(book), page, width);
   }
 
   async getAlternativeCovers(userId: string, bookId: string): Promise<AlternativeCover[]> {
@@ -422,7 +453,7 @@ export class BooksService {
     if (!keep.sourcePath && removed.sourcePath && removed.hasText) {
       const pdf = {
         sourcePath: removed.sourcePath,
-        pdfHash: removed.pdfHash ?? removed.fileHash,
+        pdfHash: pdfKeyOf(removed),
         pageCount: removed.pageCount,
         pageAspect: removed.pageAspect,
       };
